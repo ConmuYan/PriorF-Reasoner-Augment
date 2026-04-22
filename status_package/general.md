@@ -29,7 +29,7 @@
 - 若发现需求冲突、schema 漂移、silent default、threshold/alpha leakage、provenance 断裂，必须 fail closed
 
 当前任务：
-Task 4：Hidden-State Contract（尚未开始）
+Task 5：Unified Head Scoring（尚未开始）
 
 已完成文件：
 - graph_data/mat_loader.py
@@ -49,8 +49,10 @@ Task 4：Hidden-State Contract（尚未开始）
 - tests/test_evidence_schema.py
 - tests/test_prompt_builder.py
 - tests/test_output_schema.py
+- tests/test_hidden_state_pooling.py
 - self-review/task2.md
 - self-review/task3.md
+- self-review/task4.md
 
 Task 3 验收证据：
 - PYTHONPATH=. pytest -q tests/test_output_schema.py tests/test_evidence_schema.py tests/test_prompt_builder.py
@@ -75,6 +77,7 @@ Task 3 已完成内容：
 - graph_data/*
 - priorf_teacher/*
 - evidence/*
+- llm/*
 
 当前 diagnostic 路径已包含：
 - 暂无正式 diagnostic implementation 文件
@@ -83,13 +86,25 @@ Task 3 已完成内容：
 - 暂无 formal execution path 文件
 - evidence/output_schema.py 仅提供 formal strict output schema；尚未接入 formal eval runner / gate manifest / launcher
 
-Task 4 尚未完成且不得视为已完成的事项：
-- llm/hidden_state_pooling.py
-- mask-aware absolute token indexing
-- left/right padding parity tests
-- all-pad fail-closed test
-- validation/offline parity test
-- head scoring
+Task 4 验收证据：
+- PYTHONPATH=. pytest -q tests/test_hidden_state_pooling.py
+- 结果：21 passed
+- PYTHONPATH=. pytest -q tests/
+- 结果：124 passed
+
+Task 4 已完成内容：
+- pool_last_valid_token 单一公开函数，__all__ 仅含该函数
+- 10 项 fail-closed 校验顺序（TypeError/ValueError）
+- Path A 绝对位置索引（masked_fill + argmax），禁止 [:, -1, :] 与 cumsum/sum-1
+- left-pad / right-pad / all-1s / T=1 / B=1 全覆盖
+- padding-side invariance 核心防御测试（pad 位噪声不影响 pooled 结果）
+- autograd 保留测试（backward + grad 非零位置验证）
+- dtype/device 保真测试（fp32 / fp16 / bf16）
+- 模块导出限制测试（无 mean / first / cls / max pooling）
+
+Task 5 尚未完成且不得视为已完成的事项：
+- eval/head_scoring.py
+- tests/test_eval_head_parity.py
 - canonical trainer
 - fusion
 - faithfulness
