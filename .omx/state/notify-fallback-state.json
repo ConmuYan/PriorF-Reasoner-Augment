@@ -1,7 +1,7 @@
 {
-  "pid": 3253526,
+  "pid": 3254978,
   "parent_pid": 3013209,
-  "started_at": "2026-04-22T06:09:28.799Z",
+  "started_at": "2026-04-22T06:10:05.842Z",
   "cwd": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner",
   "notify_script": "/data1/mq/home/npm-global/lib/node_modules/oh-my-codex/dist/scripts/notify-hook.js",
   "authority_only": true,
@@ -17,7 +17,7 @@
     "max_per_tick": 5,
     "run_count": 1,
     "leader_only": true,
-    "last_tick_at": "2026-04-22T06:09:28.801Z",
+    "last_tick_at": "2026-04-22T06:10:05.843Z",
     "last_result": {
       "processed": 0,
       "skipped": 0,
@@ -30,7 +30,7 @@
     "leader_only": true,
     "stale_threshold_ms": 180000,
     "precomputed_leader_stale": false,
-    "last_tick_at": "2026-04-22T06:09:28.802Z",
+    "last_tick_at": "2026-04-22T06:10:05.844Z",
     "last_error": null,
     "run_count": 1
   },
@@ -57,7 +57,7 @@
   "fallback_auto_nudge": {
     "enabled": true,
     "stall_ms": 5000,
-    "last_tick_at": "2026-04-22T06:09:28.836Z",
+    "last_tick_at": "2026-04-22T06:10:05.870Z",
     "last_turn_at": "2026-04-22T06:05:59.697Z",
     "last_turn_count": 12,
     "last_message": "已推送到远端：\n\n```text\norigin main\nef48c0d..97c9727  main -> main\n```\n\n已推送的 Task 1 commit：\n\n```text\n97c972",
@@ -79,8 +79,8 @@
     "base_ms": 75,
     "max_ms": 1000,
     "current_ms": 1000,
-    "idle_streak": 72,
-    "last_tick_at": "2026-04-22T06:09:28.839Z",
+    "idle_streak": 109,
+    "last_tick_at": "2026-04-22T06:10:05.873Z",
     "last_activity_at": "2026-04-22T06:08:17.759Z",
     "last_activity_reason": "eligible_but_not_sent"
   },
