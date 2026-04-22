@@ -1,10 +1,10 @@
 {
-  "session_id": "019db3aa-0494-7463-827a-d2ff448f8693",
-  "native_session_id": "019db3aa-0494-7463-827a-d2ff448f8693",
-  "started_at": "2026-04-22T05:29:19.855Z",
-  "cwd": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner",
-  "pid": 3105231,
+  "session_id": "019db4dd-07e6-7990-a23b-ad732876f6a4",
+  "native_session_id": "019db4dd-07e6-7990-a23b-ad732876f6a4",
+  "started_at": "2026-04-22T11:04:44.243Z",
+  "cwd": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner/.omx/team/continue-from-completed-task-1/worktrees/worker-1",
+  "pid": 4140113,
   "platform": "linux",
-  "pid_start_ticks": 357450413,
-  "pid_cmdline": "/data1/mq/home/npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=\"high\" -c model_instructions_file=\"/data1/mq/codes/graph-detection-main/PriorF-Reasoner/.omx/state/sessions/omx-1776832995066-j3xhmw/AGENTS.md\""
+  "pid_start_ticks": 359528191,
+  "pid_cmdline": "/data1/mq/home/npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=\"high\" --model gpt-5.4 -c model_instructions_file=\"/data1/mq/codes/graph-detection-main/PriorF-Reasoner/.omx/team/continue-from-completed-task-1/worktrees/worker-1/AGENTS.md\""
 }
