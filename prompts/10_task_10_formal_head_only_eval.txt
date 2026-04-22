@@ -1,0 +1,61 @@
+现在执行 Task 10。只做这一个任务，不要越界。
+
+前置条件：
+- data manifest 已存在
+- teacher baseline gate 已实现
+- prompt builder 已实现
+- hidden_state_pooling 已实现
+- head_scoring.py 已实现
+- test_eval_head_parity.py 已通过
+- canonical trainer 已实现
+
+目标：
+实现正式 head-only eval，严格区分 validation threshold 与 test-like reporting。
+
+必须创建或修改的文件：
+- eval/eval_head_only.py
+- eval/calibration.py
+- tests/test_eval_head_only.py
+
+硬性要求：
+1. eval_head_only 必须调用共享的 eval/head_scoring.py
+2. eval_head_only 不能自己重新实现 prompt、tokenization、pooling 或 predict_proba
+3. 正式 test-like population 上禁止重新优化 threshold
+4. 正式输出必须至少包含：
+   - auroc
+   - auprc
+   - f1_at_val_threshold
+   - precision_at_val_threshold
+   - recall_at_val_threshold
+   - specificity_at_val_threshold
+   - prediction_std
+   - population metadata
+5. 可以额外输出 oracle threshold 指标，但必须明确命名为 diagnostic，不得进入 headline metrics
+6. calibration.py 中可以实现：
+   - brier score
+   - ece / calibration gap
+   - threshold report
+7. 不要实现 fusion
+8. 不要实现 faithfulness
+9. 不要修改 trainer
+10. 必须强制校验 LLM backbone / PEFT adapter 权重与 cls_head 权重来自完全相同的 checkpoint provenance。至少校验：
+   - run_id
+   - checkpoint_step 或 epoch
+   - commit
+   - config_fingerprint
+   - data_manifest_hash
+   - graph_regime
+   若缺失 cls_head 权重、缺失 provenance、或 provenance 不匹配，必须 fail closed，绝不允许静默回退到随机初始化权重，也绝不允许混用不同 checkpoint 的 backbone 与 head。
+额外要求：
+- 若 population 只有单类，必须 fail closed 或返回明确不可计算状态
+- 输出 contract 不允许是裸 dict，必须有正式 schema / Pydantic 模型
+- 评估时必须记录 checkpoint source（best checkpoint / final checkpoint）
+
+交付时必须输出：
+1. 修改文件列表
+2. eval_head_only 的输入输出 contract
+3. validation threshold 是如何注入的
+4. 哪些指标是 headline，哪些是 diagnostic
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 11。

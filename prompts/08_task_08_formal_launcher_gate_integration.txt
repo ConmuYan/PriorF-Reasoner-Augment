@@ -1,0 +1,27 @@
+现在执行 Task 8。只做这一个任务，不要越界。
+
+目标：
+让 formal launcher 在没有 gate manifest 或 gate 不通过时直接失败。
+
+必须创建或修改的文件：
+- scripts/run_full_pipeline.sh
+- 如有需要，相关 launcher 辅助脚本
+- tests/test_formal_launcher_gate.py
+
+硬性要求：
+1. 在执行任何 formal path 之前，必须调用 gate_check
+2. 无 gate manifest 时，formal launcher 必须 exit non-zero
+3. gate 不通过时，formal launcher 必须 exit non-zero
+4. 不允许 fallback 到 diagnostic 或 smoke-only 路径来伪装 formal
+5. 如果保留 override，必须写入 provenance
+6. formal / gated / diagnostic 输出目录必须分流
+7. 不要改 trainer
+8. 不要改 eval 逻辑
+
+交付时必须输出：
+1. launcher 改动前后的执行顺序
+2. gate_check 是如何接入 formal path 的
+3. formal / gated / diagnostic 三类输出是如何分流的
+4. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 9。

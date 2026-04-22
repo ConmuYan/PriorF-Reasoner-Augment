@@ -1,0 +1,40 @@
+现在执行 Task 7。只做这一个任务，不要越界。
+
+目标：
+实现正式 gate manifest schema 和 gate_check 脚本。
+
+必须创建或修改的文件：
+- scripts/gate_check.py
+- （如合适）schemas/gate_manifest.py 或等价路径
+- tests/test_gate_check.py
+
+硬性要求：
+1. GateManifest 必须使用 Pydantic 建模
+2. gate_check 必须在以下任何一项失败时 exit non-zero：
+   - data_validation_pass
+   - teacher_baseline_pass
+   - subset_head_gate_pass
+   - validation_eval_parity_pass
+   - student_contribution_pass
+   - strict_schema_parse_pass
+   - smoke_pipeline_pass
+3. GateManifest 还必须包含：
+   - schema_version
+   - graph_regime
+   - commit
+   - generated_at
+   - config_fingerprint
+   - data_manifest_hash
+4. 不允许 manifest 缺字段后自动兜底
+5. 不允许弱类型容错
+6. 不要实现 launcher
+7. 不要实现 trainer
+8. 不要实现 eval
+
+交付时必须输出：
+1. GateManifest 模型摘要
+2. gate_check 的 fail-closed 逻辑
+3. 哪些输入会导致 exit non-zero
+4. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 8。

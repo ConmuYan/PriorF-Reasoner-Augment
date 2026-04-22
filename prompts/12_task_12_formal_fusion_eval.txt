@@ -1,0 +1,53 @@
+现在执行 Task 12。只做这一个任务，不要越界。
+
+前置条件：
+- eval_head_only.py 已实现
+- teacher baseline artifact 已实现
+- validation threshold / population metadata 已实现
+- teacher-prob ablation 审计已实现
+
+目标：
+实现正式 fusion eval，严格要求 validation-only alpha selection。
+
+必须创建或修改的文件：
+- eval/eval_fusion.py
+- llm/fusion.py
+- tests/test_eval_fusion.py
+
+硬性要求：
+1. 正式 fusion API 必须接收两个独立输入：
+   - validation predictions
+   - test-like predictions
+2. alpha 只能在 validation population 上优化
+3. test-like population 上只能使用冻结 alpha 做纯 forward reporting
+4. 正式输出必须包含：
+   - optimal_alpha
+   - teacher_only metrics
+   - head_only metrics
+   - fusion metrics
+   - student_contribution_pass
+   - population metadata
+5. 如果 optimal_alpha 低于配置下限，student_contribution_pass 必须为 false
+6. 不允许再使用“同一个 dataframe 内部切 holdout 再回到全池报 headline metric”的逻辑
+7. 不允许在 test-like population 上重新调 threshold
+8. 不要实现 faithfulness
+9. 不要修改 trainer
+10. Alpha selection 不能简单地对单一指标做无约束 argmax。必须采用“主指标优化 + 约束保护”的验证集选择规则：
+   - 先明确一个 primary metric（默认 AUPRC；如配置另有说明，可为 F1）
+   - 在 validation population 上选择使 primary metric 最优的 alpha
+   - 但必须同时满足 secondary guardrail（默认 AUROC 不得低于 teacher baseline 减去设定容忍阈值）
+   - 并记录 teacher degradation tolerance 是否被触发
+   禁止无脑 argmax 单一指标。
+额外要求：
+- fusion.py 只负责融合，不负责调参和读数据
+- eval_fusion.py 必须显式区分 validation artifact 和 test artifact
+- 如果 checkpoint provenance 缺失，formal fusion eval 必须 fail closed
+
+交付时必须输出：
+1. 修改文件列表
+2. fusion API 的输入输出 contract
+3. alpha selection 在 validation 上是如何实现的
+4. student_contribution_pass 的判定逻辑
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 13。

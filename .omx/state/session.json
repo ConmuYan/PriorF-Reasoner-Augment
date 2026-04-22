@@ -1,9 +1,10 @@
 {
-  "session_id": "omx-1776832995066-j3xhmw",
-  "started_at": "2026-04-22T04:43:15.218Z",
+  "session_id": "019db3aa-0494-7463-827a-d2ff448f8693",
+  "native_session_id": "019db3aa-0494-7463-827a-d2ff448f8693",
+  "started_at": "2026-04-22T05:29:19.855Z",
   "cwd": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner",
-  "pid": 3013165,
+  "pid": 3105231,
   "platform": "linux",
-  "pid_start_ticks": 357240172,
-  "pid_cmdline": "node /data1/mq/home/npm-global/bin/omx --madmax --high"
+  "pid_start_ticks": 357450413,
+  "pid_cmdline": "/data1/mq/home/npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=\"high\" -c model_instructions_file=\"/data1/mq/codes/graph-detection-main/PriorF-Reasoner/.omx/state/sessions/omx-1776832995066-j3xhmw/AGENTS.md\""
 }

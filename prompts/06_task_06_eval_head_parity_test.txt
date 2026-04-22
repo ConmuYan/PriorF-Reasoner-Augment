@@ -1,0 +1,30 @@
+现在执行 Task 6。只做这一个任务，不要越界。
+
+目标：
+实现 tests/test_eval_head_parity.py，验证 validation path 与 offline eval path 的严格一致性。
+
+必须创建或修改的文件：
+- tests/test_eval_head_parity.py
+
+硬性要求：
+1. 这个测试不能只比较 AUROC/AUPRC
+2. 必须逐层验证：
+   - 相同 prompt builder
+   - 相同 chat template
+   - 相同 token indices
+   - 相同 hidden-state indices
+   - 相同 predict_proba
+   - validation path 与 offline eval path 的逐样本一致性
+3. 允许使用 dummy batch、mock tokenizer、mock model、mock cls head
+4. 必须验证 train/validation path 与 offline path 的 contract 一致，而不是只测一个 Linear 层
+5. 不要实现 trainer
+6. 不要实现 fusion
+7. 不要实现 faithfulness
+
+交付时必须输出：
+1. 这个 parity test 一共验证了哪几层
+2. 哪些差异会导致测试失败
+3. 这个测试如何帮助阻止 validation/eval 漂移
+4. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 7。

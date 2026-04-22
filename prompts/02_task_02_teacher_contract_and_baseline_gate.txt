@@ -1,0 +1,55 @@
+现在执行 Task 2。只做这一个任务，不要越界。
+
+目标：
+实现 teacher export schema、teacher baseline gate、teacher export pipeline 雏形。
+
+必须创建或修改的文件：
+- priorf_teacher/schema.py
+- priorf_teacher/teacher_baseline_gate.py
+- priorf_teacher/export_pipeline.py
+- tests/test_teacher_export.py
+- tests/test_teacher_baseline_gate.py
+
+硬性要求：
+1. teacher export 必须包含以下字段：
+   - dataset_name
+   - teacher_model_name
+   - teacher_checkpoint
+   - population_name
+   - node_id
+   - ground_truth_label
+   - teacher_prob
+   - teacher_logit
+   - hsd
+   - hsd_quantile
+   - asda_switch
+   - mlp_logit
+   - gnn_logit
+   - branch_gap
+   - relation_profile
+   - neighbor_summary
+   - high_hsd_flag
+   - graph_regime
+2. graph_regime 只能允许：
+   - transductive_standard
+   - inductive_masked
+3. teacher baseline gate 必须在 teacher 基线不达标时 fail closed
+4. teacher export artifact 必须包含 provenance 信息
+5. 不要实现 student 训练
+6. 不要实现 fusion
+7. 不要实现 faithfulness
+
+代码要求：
+- 必须使用 Pydantic 定义 teacher export contract
+- 不允许把 graph_regime 当普通字符串散落在代码里
+- 不允许复用 label 字段表示 teacher label / ground truth / pseudo label
+
+交付时必须输出：
+1. 修改文件列表
+2. teacher export schema 摘要
+3. teacher baseline gate 的输入输出
+4. graph_regime 是如何被写入 artifact 的
+5. fail-closed 的触发点
+6. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 3。

@@ -1,9 +1,13 @@
 {
-  "total_injections": 0,
-  "pane_counts": {},
+  "total_injections": 1,
+  "pane_counts": {
+    "%0": 1
+  },
   "session_counts": {},
-  "recent_keys": {},
-  "last_injection_ts": 0,
-  "last_reason": "disabled",
-  "last_event_at": "2026-04-22T04:37:07.809Z"
+  "recent_keys": {
+    "05c682992a3c6e8def9b0a790ddea5fe9344514ae6c249ae34dcc2b03e860b3f": 1776836974560
+  },
+  "last_injection_ts": 1776836974560,
+  "last_reason": "mode_not_allowed",
+  "last_event_at": "2026-04-22T06:05:59.700Z"
 }

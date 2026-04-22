@@ -1,0 +1,43 @@
+现在执行 Task 5。只做这一个任务，不要越界。
+
+目标：
+实现统一的 head scoring 模块，供 epoch-end validation 和 offline head eval 共用。
+
+必须创建或修改的文件：
+- eval/head_scoring.py
+- tests/test_head_scoring.py
+
+硬性要求：
+1. CoTrain epoch-end validation 和 offline eval_head_only 必须共用这个 scorer
+2. scorer 只能输出：
+   - threshold-free 指标
+   - 原始 probs
+   - labels
+   - metadata
+3. scorer 不允许做：
+   - threshold optimization
+   - alpha optimization
+   - checkpoint selection policy
+4. scorer 必须复用：
+   - 同一个 prompt builder
+   - 同一个 tokenization path
+   - 同一个 hidden_state_pooling
+   - 同一个 predict_proba path
+5. 如果实现分布式支持，必须显式考虑 Accelerate gather_for_metrics
+6. 不要实现 fusion
+7. 不要实现 faithfulness
+8. 不要实现 trainer
+
+代码要求：
+- 处理单类 population 的边界保护
+- 返回结构不能是裸 tuple，必须是可审计 contract
+- 记录 population metadata
+
+交付时必须输出：
+1. 修改文件列表
+2. scorer 的输入输出 contract
+3. validation/offline 是如何共用它的
+4. 哪些指标被明确禁止在 scorer 层计算
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 6。

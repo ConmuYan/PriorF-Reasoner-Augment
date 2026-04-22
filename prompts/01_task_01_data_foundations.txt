@@ -1,0 +1,49 @@
+现在执行 Task 1。只做这一个任务，不要越界。
+
+目标：
+实现数据基础设施与 fail-closed 的 data manifest。
+
+必须创建或修改的文件：
+- graph_data/mat_loader.py
+- graph_data/validators.py
+- graph_data/manifests.py
+- tests/test_mat_loader.py
+- tests/test_manifests.py
+
+硬性要求：
+1. mat_loader 的标准化输出必须统一为：
+   - x
+   - ground_truth_label
+   - relations
+   - node_ids
+   - split_vector
+   - metadata
+2. validators 必须校验：
+   - Amazon 特征维度 25
+   - YelpChi 特征维度 32
+   - relation 数量 3
+   - 无 NaN / Inf
+   - 节点顺序稳定
+   - split 可复现
+3. 必须使用 Pydantic 为 DataManifest 建模
+4. 所有下游 train/eval 入口以后都必须依赖 manifest，而不是直接依赖裸 parquet/csv 路径
+5. 发现非法输入时必须 fail closed，不能 warning 后继续
+6. 不要实现训练代码
+7. 不要实现 teacher 导出
+8. 不要实现 eval 逻辑
+
+代码要求：
+- Python 3.11
+- 类型标注完整
+- 公共函数要有 docstring
+- 不要使用裸 dict 作为正式 contract
+- 不要复用字段名 label，必须使用 ground_truth_label
+
+交付时必须输出：
+1. 修改文件列表
+2. 新增的 Pydantic 模型
+3. fail-closed 点有哪些
+4. 新增测试覆盖了哪些情况
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 2。

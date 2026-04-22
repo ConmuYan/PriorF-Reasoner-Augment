@@ -1,0 +1,46 @@
+现在执行 Task 3。只做这一个任务，不要越界。
+
+目标：
+实现 Evidence Card schema、prompt builder、正式输出 schema。
+
+必须创建或修改的文件：
+- evidence/evidence_schema.py
+- evidence/prompt_builder.py
+- evidence/output_schema.py
+- tests/test_evidence_schema.py
+- tests/test_prompt_builder.py
+
+硬性要求：
+1. 使用 Pydantic 定义 Evidence Card
+2. 使用 Pydantic 定义正式输出 schema
+3. 正式输出字段必须严格为：
+   - rationale
+   - evidence
+   - pattern_hint
+   - label
+   - score
+4. canonical few-shot/example 的序列化顺序必须固定为：
+   - rationale
+   - evidence
+   - pattern_hint
+   - label
+   - score
+5. prompt builder 必须统一 train / validation / eval / generation 的消息结构
+6. 不要写 alias parser
+7. 不要写 generation 解析器
+8. 不要实现 trainer
+
+额外要求：
+- 解释清楚“JSON 语义顺序”和“生成序列化顺序”的区别
+- 必须保证 prompt builder 是单一入口
+- Evidence Card 需要支持后续 schema-preserving ablation
+
+交付时必须输出：
+1. 修改文件列表
+2. Evidence Card Pydantic 模型摘要
+3. 输出 schema Pydantic 模型摘要
+4. prompt builder 的统一入口设计
+5. 为什么采用 rationale -> evidence -> pattern_hint -> label -> score 的序列化顺序
+6. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 4。

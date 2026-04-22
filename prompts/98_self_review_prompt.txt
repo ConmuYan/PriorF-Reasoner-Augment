@@ -1,0 +1,11 @@
+请对你刚刚完成的任务做严格的 fail-closed 自审，只输出以下内容：
+
+1. 你本次改动是否引入了新的 silent default
+2. 你本次改动是否让 canonical 和 diagnostic 路径再次混淆
+3. 你本次改动是否可能重新引入 threshold / alpha leakage
+4. 你本次改动是否可能让 formal metrics 和 diagnostic metrics 混用
+5. 你本次改动新增了哪些 schema / provenance / gate contract
+6. 你本次新增测试分别在防什么
+7. 你认为还剩下的 3 个最大风险点是什么
+
+不要继续编码，不要扩展功能，只做审查。

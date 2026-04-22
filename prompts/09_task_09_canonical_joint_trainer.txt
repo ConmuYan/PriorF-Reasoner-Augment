@@ -1,0 +1,39 @@
+现在执行 Task 9。只做这一个任务，不要越界。
+
+目标：
+实现 canonical joint trainer。
+
+必须创建或修改的文件：
+- train/train_stage2_canonical.py
+- tests/test_canonical_trainer.py
+
+硬性要求：
+1. 使用 Accelerate
+2. canonical objective 必须同时包含：
+   - L_gen
+   - L_cls
+   - L_distill
+3. L_distill 的默认实现必须是：
+   - BCEWithLogitsLoss(student_logits, clipped_teacher_prob)
+4. 任何会导致 canonical objective 缺项的配置，必须直接报错退出
+5. 不允许静默关闭 generation loss
+6. 不允许静默关闭 distillation loss
+7. 不允许 frozen probe 逻辑混入 canonical trainer
+8. 验证必须调用共享的 eval/head_scoring.py
+9. trainer 必须记录：
+   - config
+   - checkpoint provenance
+   - population metadata
+   - graph_regime
+10. 不要实现 diagnostic trainer
+11. 不要实现 fusion
+12. 不要实现 faithfulness
+
+交付时必须输出：
+1. trainer 输入 contract
+2. 三个 loss 的计算路径
+3. 哪些配置组合会 fail closed
+4. validation checkpoint selection 是如何依赖统一 scorer 的
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续后续 eval / fusion / faithfulness。

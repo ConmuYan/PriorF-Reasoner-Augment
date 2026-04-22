@@ -1,0 +1,53 @@
+现在执行 Task 13。只做这一个任务，不要越界。
+
+前置条件：
+- 输出 schema 已实现
+- prompt builder 已实现
+- canonical generation 路径已实现
+
+目标：
+实现正式 generation eval，区分 strict schema parse 和 normalized parse，并显式标记 teacher-conditioned 属性。
+
+必须创建或修改的文件：
+- eval/eval_gen_only.py
+- llm/parsing.py
+- tests/test_eval_gen_only.py
+- tests/test_strict_output_schema.py
+
+硬性要求：
+1. 正式 generation eval 必须输出两个 parse 指标：
+   - strict_schema_parse_rate
+   - normalized_parse_rate
+2. headline metric 只能使用 strict_schema_parse_rate
+3. normalized_parse_rate 只能作为 diagnostic
+4. generation eval 必须显式输出：
+   - teacher_conditioned = true
+5. test-like population 上禁止优化 threshold
+6. 如果需要分类相关指标，只允许：
+   - threshold-free metrics
+   - validation threshold 下的指标
+7. 不允许 alias parser 参与正式 parse 成功率
+8. 不要实现 fusion
+9. 不要实现 faithfulness
+10. 不要修改 trainer
+11. Strict Parse 失败的样本绝不允许直接 drop，导致评估分母缩小。必须采用以下两种严格策略之一，并写入 provenance：
+   - penalty mode：将 parse 失败样本保留在分母中，并映射为预先定义的最差预测策略
+   - fail-closed mode：当 strict parse 失败率超过设定阈值时，拒绝计算该 population 的分类指标
+   无论采用哪种策略，都必须显式记录 strict parse failures 的样本数、占比和处理方式。
+额外要求：
+- strict parser 必须只接受正式 schema：
+  - rationale
+  - evidence
+  - pattern_hint
+  - label
+  - score
+- normalized parser 可以单独存在，但必须明确放到 diagnostic 路径
+
+交付时必须输出：
+1. 修改文件列表
+2. strict parser 与 normalized parser 的区别
+3. teacher_conditioned 是如何在报告中表达的
+4. headline vs diagnostic 指标如何区分
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 14。

@@ -1,0 +1,42 @@
+现在执行 Task 11。只做这一个任务，不要越界。
+
+前置条件：
+- eval_head_only.py 已实现
+- Evidence Card schema 已实现
+- Evidence Card 中存在 teacher_summary.teacher_prob 或等价 teacher probability 字段
+
+目标：
+实现 teacher-probability ablation 的正式审计路径。
+
+必须创建或修改的文件：
+- evidence/ablations.py
+- eval/eval_head_only.py（仅在必要时接入 ablation 入口）
+- tests/test_teacher_prob_ablation.py
+
+硬性要求：
+1. 必须提供 schema-preserving 的 Evidence Card ablation
+2. ablation 只能移除或掩蔽 teacher probability 相关字段，不能改变整个 prompt 分布
+3. 必须支持两种正式报告：
+   - full Evidence Card
+   - teacher-prob-ablated Evidence Card
+4. 输出中必须明确包含：
+   - teacher_prob_dependency_high （布尔或等价状态）
+5. 不要把 ablation 写成 "{}" 或删掉整个 card
+6. 不要实现 fusion
+7. 不要实现 faithfulness
+8. 不要改 trainer
+9. 对 teacher probability、teacher logit、branch gap 等数值字段进行 ablation 时，禁止使用 0.0、-1、999 或任何可能携带业务语义的占位数值。必须在 Evidence Schema 中显式支持缺失语义（例如 null / masked），并在 Prompt Builder 中统一渲染为无歧义文本（例如 "Teacher Prior: Masked" 或 "Not Available"）。被 mask 的字段不得再以任何数值形式出现在 prompt 中。
+
+额外要求：
+- prompt builder 生成的 message 结构必须保持不变
+- schema 必须仍能通过验证
+- 不允许引入新的 alias 字段
+
+交付时必须输出：
+1. 修改文件列表
+2. ablation 是如何保持 schema-preserving 的
+3. full card 与 ablated card 的对比输出长什么样
+4. teacher_prob_dependency_high 的判定逻辑
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 12。

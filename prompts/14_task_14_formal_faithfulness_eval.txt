@@ -1,0 +1,47 @@
+现在执行 Task 14。只做这一个任务，不要越界。
+
+前置条件：
+- eval_head_only.py 已实现
+- eval_fusion.py 已实现
+- prompt builder 已实现
+- Evidence Card ablations 已实现
+- validation-selected alpha 与 threshold 已有 artifact
+
+目标：
+实现正式 faithfulness eval，必须走和正式推理一致的路径。
+
+必须创建或修改的文件：
+- eval/faithfulness.py
+- tests/test_faithfulness.py
+
+硬性要求：
+1. faithfulness 必须至少实现：
+   - sufficiency
+   - comprehensiveness
+   - evidence-ablation impact
+2. faithfulness 必须复用正式推理路径：
+   - 同一个 prompt builder
+   - 同一个 tokenization path
+   - 同一个 hidden-state contract
+   - 同一个 frozen alpha
+   - 同一个 frozen threshold
+3. 只能做 schema-preserving ablations
+4. 禁止用 "{}" 这种改变整个 prompt 分布的伪 ablation
+5. 正式 faithfulness 不允许默认只抽 5 个样本
+6. 如果样本量过小，必须标记为 smoke / diagnostic，而不是 formal
+7. 不要修改 trainer
+8. 不要修改 fusion selection 逻辑
+
+额外要求：
+- 输出 contract 必须包含样本规模
+- 输出 contract 必须包含所用的 alpha / threshold 来源
+- 若 formal 条件不满足，应 fail closed，而不是自动降级成 sampled eval
+
+交付时必须输出：
+1. 修改文件列表
+2. 这三个 faithfulness 指标分别如何定义
+3. 如何保证复用了正式推理路径
+4. 为什么当前实现不会退化成“另一个简化模型”
+5. 还没有做什么
+
+完成后停下，等我审核，不要继续 Task 15。

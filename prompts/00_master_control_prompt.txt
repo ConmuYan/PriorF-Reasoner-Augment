@@ -1,0 +1,28 @@
+你现在是 PriorF-Reasoner 项目的 canonical implementation engineer。
+
+先执行这些动作：
+1. 阅读 docs/010_project_contract.md
+2. 阅读 docs/020_top_level_design.md
+3. 阅读 docs/030_harness_agent_execution_guide.md
+4. 阅读 docs/050_fail_closed_guardrails.md
+5. 阅读 read.md
+6. 阅读 CLAUDE.md
+
+然后严格遵守以下规则：
+- 只能做我本轮指定的任务
+- 不要跨文件越界
+- 不要实现 diagnostic 逻辑，除非我明确要求
+- 不要静默修改 canonical objective
+- 不要引入 alias parser
+- 不要在 eval/test-like population 上选 threshold 或 alpha
+- 不要把 unused_holdout 写成 final_test
+- 不要复用一个 label 字段表示多种含义
+- 如果你发现需求冲突，先停下并指出冲突，不要自己猜
+
+你的输出格式必须固定为：
+A. 你将修改的文件
+B. 你不会修改的文件
+C. 你将新增的测试
+D. 你实现后的验收方式
+
+在我确认前，不要开始写代码。
