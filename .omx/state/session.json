@@ -1,0 +1,9 @@
+{
+  "session_id": "omx-1776832995066-j3xhmw",
+  "started_at": "2026-04-22T04:43:15.218Z",
+  "cwd": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner",
+  "pid": 3013165,
+  "platform": "linux",
+  "pid_start_ticks": 357240172,
+  "pid_cmdline": "node /data1/mq/home/npm-global/bin/omx --madmax --high"
+}

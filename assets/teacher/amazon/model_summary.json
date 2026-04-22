@@ -1,0 +1,20 @@
+{
+  "config": {
+    "model": {
+      "in_dim": 26,
+      "mlp_hidden": 64,
+      "gnn_hidden": 64,
+      "out_hidden": 64,
+      "num_relations": 3,
+      "use_asda": true,
+      "use_mlp_branch": true,
+      "use_gnn_branch": true,
+      "asda_tau": 0.1,
+      "proj_dim": 64,
+      "dropout": 0.3
+    }
+  },
+  "epoch": 354,
+  "best_metric": 0.8317897716196164,
+  "best_epoch": 354
+}
