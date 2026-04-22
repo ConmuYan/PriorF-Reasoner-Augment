@@ -12,7 +12,11 @@
 - Task 3 已完成并已人工审核通过
 - Task 3 的目标是 Evidence Card schema / prompt builder / strict output schema / schema-preserving ablation API
 - Task 3 已通过对应测试
-- 当前准备进入 Task 4
+- Task 4 已完成并已人工审核通过
+- Task 4 的目标是 Hidden-State Contract（mask-aware absolute token indexing）
+- Task 4 已实现 llm/hidden_state_pooling.py / llm/__init__.py
+- Task 4 已通过对应测试并已提交
+- 当前准备进入 Task 5
 
 必须遵守的 source-of-truth 文件：
 - docs/010_project_contract.md
