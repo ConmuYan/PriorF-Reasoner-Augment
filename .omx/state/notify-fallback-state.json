@@ -6,7 +6,7 @@
   "notify_script": "/data1/mq/home/npm-global/lib/node_modules/oh-my-codex/dist/scripts/notify-hook.js",
   "authority_only": false,
   "poll_ms": 250,
-  "effective_poll_ms": 250,
+  "effective_poll_ms": 1000,
   "idle_max_poll_ms": 1000,
   "pid_file": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner/.omx/state/notify-fallback.pid",
   "max_lifetime_ms": 21600000,
@@ -15,9 +15,9 @@
   "dispatch_drain": {
     "enabled": true,
     "max_per_tick": 5,
-    "run_count": 15086,
+    "run_count": 15164,
     "leader_only": true,
-    "last_tick_at": "2026-04-22T06:08:06.790Z",
+    "last_tick_at": "2026-04-22T06:08:52.935Z",
     "last_result": {
       "processed": 0,
       "skipped": 0,
@@ -29,17 +29,17 @@
     "enabled": true,
     "leader_only": true,
     "stale_threshold_ms": 180000,
-    "precomputed_leader_stale": true,
-    "last_tick_at": "2026-04-22T06:08:06.790Z",
+    "precomputed_leader_stale": false,
+    "last_tick_at": "2026-04-22T06:08:52.935Z",
     "last_error": null,
-    "run_count": 14977
+    "run_count": 15055
   },
   "ralph_continue_steer": {
     "enabled": true,
     "cadence_ms": 60000,
     "message": "Ralph loop active continue",
     "active": false,
-    "last_state_check_at": "2026-04-22T06:08:06.794Z",
+    "last_state_check_at": "2026-04-22T06:08:52.937Z",
     "last_sent_at": "",
     "cooldown_anchor_at": "",
     "last_reason": "blocked_by_current_session",
@@ -57,7 +57,7 @@
   "fallback_auto_nudge": {
     "enabled": true,
     "stall_ms": 5000,
-    "last_tick_at": "2026-04-22T06:08:06.793Z",
+    "last_tick_at": "2026-04-22T06:08:52.936Z",
     "last_turn_at": "2026-04-22T06:05:59.697Z",
     "last_turn_count": 12,
     "last_message": "已推送到远端：\n\n```text\norigin main\nef48c0d..97c9727  main -> main\n```\n\n已推送的 Task 1 commit：\n\n```text\n97c972",
@@ -78,11 +78,11 @@
     "enabled": true,
     "base_ms": 250,
     "max_ms": 1000,
-    "current_ms": 250,
-    "idle_streak": 0,
-    "last_tick_at": "2026-04-22T06:08:06.794Z",
-    "last_activity_at": "2026-04-22T06:08:06.794Z",
-    "last_activity_reason": "leader_nudge"
+    "current_ms": 1000,
+    "idle_streak": 36,
+    "last_tick_at": "2026-04-22T06:08:52.938Z",
+    "last_activity_at": "2026-04-22T06:08:17.759Z",
+    "last_activity_reason": "eligible_but_not_sent"
   },
-  "last_cycle_activity": "leader_nudge"
+  "last_cycle_activity": "eligible_but_not_sent"
 }
