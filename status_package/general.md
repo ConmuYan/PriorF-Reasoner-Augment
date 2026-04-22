@@ -43,6 +43,7 @@ Task 6：Validation/Offline Head Parity Test（尚未开始）
 - graph_data/mat_loader.py
 - graph_data/validators.py
 - graph_data/manifests.py
+- priorf_teacher/inference.py
 - priorf_teacher/schema.py
 - priorf_teacher/teacher_baseline_gate.py
 - priorf_teacher/export_pipeline.py
@@ -54,6 +55,8 @@ Task 6：Validation/Offline Head Parity Test（尚未开始）
 - llm/hidden_state_pooling.py
 - eval/__init__.py
 - eval/head_scoring.py
+- scripts/legacy_mat_to_canonical.py
+- scripts/generate_teacher_exports.py
 - tests/test_mat_loader.py
 - tests/test_manifests.py
 - tests/test_teacher_export.py
@@ -87,15 +90,42 @@ Task 3 已完成内容：
 - schema-preserving ablation prompt rendering with `Masked / Not Available` sentinel
 - prompt-related env var fail-closed guard
 
+Task 2 运行时验收（operator data materialization）：
+- 原 Task 2 合同仅覆盖 schema / gate / pipeline 三件 IO 合同与 unit tests，并未要求、也未实际产出 parquet；真实 teacher export artifact 的产出在 Task 5 审结前后由 operator 统一补做
+- 归属：该组件属于 Task 2 的运行时验收（docs/030 §Task 2 Acceptance），不是 Task 6 内容；Task 6 parity test 以产出的 parquet 为读端但不负责产出
+- 涉及文件：priorf_teacher/inference.py、scripts/legacy_mat_to_canonical.py、scripts/generate_teacher_exports.py、scripts/verify_teacher_metric_consistency.py（诊断）
+- 数据流：legacy `.mat` → scripts/legacy_mat_to_canonical.py（StratifiedShuffleSplit random_state=717，7:1:2）→ canonical `.mat` → priorf_teacher/inference.py（LGHGCLNetV2 full-graph forward）→ TeacherExportRecord per population → teacher_baseline_gate（validation）→ write_teacher_export_artifact（每 population 一个 parquet）
+- 当前 bridge 推理结果（2026-04-22 验证，scripts/verify_teacher_metric_consistency.py 实测）：
+  - Amazon : n_val=1194  pos_rate=0.0687 | AUROC=0.9744 | AUPRC_trap=0.8860 | AUPRC_step=0.8864
+  - YelpChi: n_val=4595  pos_rate=0.1454 | AUROC=0.9867 | AUPRC_trap=0.9539 | AUPRC_step=0.9539
+  - model_summary.best_metric（参考）：amazon=0.8318，yelpchi=0.8421（来自原训练 early-stopping 记录）
+- Artifact baseline hash（2026-04-22 18:52 pin 死，后续所有产出必须与此对齐）：
+  - assets/data/Amazon_canonical.mat    sha256=c77d595fd741cfa9ff34bab5413775e366b8b1face248885c3e65295efa3f9d7    mtime=2026-04-22 17:23    size≈3.2GB
+  - assets/data/YelpChi_canonical.mat   sha256=778498b72a788cccf91d8260ae7e320375a8894e8c3b21485b58bdd14d64faea    mtime=2026-04-22 17:29    size≈108MB
+  - assets/teacher/amazon/best_model.pt sha256=ca8ae67eb12c619dec3459a48039f14c0762d32f5bd85577d980217dbe21f894    mtime=2026-04-22 11:28
+  - assets/teacher/yelpchi/best_model.pt sha256=bfc5d1bde3b2479cee6fa75254bdef076c2b2595bc94ab5b48e4fca0f78a9441   mtime=2026-04-22 11:28
+- Amazon gate 现状：validation AUROC=0.9744 ≥ 0.80 → 通过；但历史已写入 outputs/gated/teacher_exports/amazon/* 的 artifact 使用的是旧 canonical .mat（mtime < 17:23 的 v1 版本）产出、且 TeacherProvenance.code_git_sha=0×40 占位，审计链不完整，需在 bridge 代码 commit 后重跑覆写
+- YelpChi gate 现状：validation AUROC=0.9867 ≥ 0.80 → 通过；artifact 尚未产出，需在 bridge 代码 commit 后首次写入 outputs/gated/teacher_exports/yelpchi/*
+- 早先历史诊断（已被当前实测证据否定，保留仅作时间线记录）：
+  - 旧观测 "YelpChi AUROC=0.7518" 来自 v1 canonical .mat + 早先 bridge 源码组合，该数字从未入 git 历史（git log -S "0.7518" 为空），仅存在于 operator 手改工作区
+  - 关于"梯形法 AUPRC 过估 0.05–0.15"的假设被实测推翻：AUPRC_trap 与 AUPRC_step 在两个数据集上数值差 ≤ 4e-4
+  - 关于"gate 需改 metric 为 AUPRC 或改 per-dataset 阈值"的方案 B/C 在当前 AUROC 下均无需执行，0.80 AUROC 阈值在两个数据集上都成立
+- 审计链形式性断裂（follow-up 待补齐）：
+  - priorf_teacher/inference.py、scripts/legacy_mat_to_canonical.py、scripts/generate_teacher_exports.py、scripts/verify_teacher_metric_consistency.py 在本 Task 2 运行时验收登记前均未纳入 git；`code_git_sha=GIT_SHA_PLACEHOLDER="0"*40` 是形式占位
+  - Amazon_canonical.mat 体积 ≈3.2GB（YelpChi 仅 108MB），疑为 legacy_mat_to_canonical.py 在 Amazon 上存储了稠密 float64 relation 矩阵；不影响当前 AUROC 但作为独立 follow-up
+  - .gitignore 未覆盖 outputs/、assets/data/*_canonical.mat、priorf_gnn/、manifests/；须在后续统一补 ignore，防止误入库
+
 当前 canonical 路径已包含：
 - graph_data/*
+- scripts/{legacy_mat_to_canonical,generate_teacher_exports}.py
+- priorf_teacher/inference.py
 - priorf_teacher/{schema,teacher_baseline_gate,export_pipeline}.py
 - evidence/*
 - llm/*
 - eval/{head_scoring,__init__}.py
 
 当前 diagnostic 路径已包含：
-- 暂无正式 diagnostic implementation 文件
+- scripts/verify_teacher_metric_consistency.py：一次性诊断脚本，复算 Amazon/YelpChi validation 的 (AUROC, AUPRC_trapezoidal, AUPRC_step)，用于核验 model_summary.best_metric 与 bridge 实测的口径一致性；严格不写 outputs/、不写 parquet、不走 canonical/formal 路径
 - Task 5 未对 canonical scorer 开任何 diagnostic 后门（无 oracle_threshold / probe mode / env-var switch）
 
 当前 formal 路径已包含：
