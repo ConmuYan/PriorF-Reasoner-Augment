@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import pytest
+import sklearn.metrics
+from pydantic import ValidationError
+
+from eval.eval_fusion import FusionEvalConfig, FusionPopulationInputs, run_formal_fusion_eval
+from eval.head_scoring import CheckpointProvenance, ScorerReport
+from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
+
+
+CHECKPOINT = CheckpointProvenance(
+    path="outputs/gated/ckpt-step-8.safetensors",
+    step=8,
+    content_hash="a" * 64,
+)
+
+
+def _scorer_report(*, population: PopulationName, probs: tuple[float, ...], labels: tuple[int, ...], checkpoint: CheckpointProvenance = CHECKPOINT) -> ScorerReport:
+    n_total = len(labels)
+    n_positive = sum(labels)
+    n_negative = n_total - n_positive
+    is_single = n_positive == 0 or n_negative == 0
+    auroc = None if is_single else float(sklearn.metrics.roc_auc_score(labels, probs))
+    auprc = None if is_single else float(sklearn.metrics.average_precision_score(labels, probs))
+    return ScorerReport(
+        dataset_name=DatasetName.AMAZON,
+        population_name=population,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        checkpoint_provenance=checkpoint,
+        scorer_schema_version="head_scorer/v1",
+        n_total=n_total,
+        n_positive=n_positive,
+        n_negative=n_negative,
+        is_single_class_population=is_single,
+        auroc=auroc,
+        auprc=auprc,
+        brier_score=float(sklearn.metrics.brier_score_loss(labels, probs)),
+        prob_mean=sum(probs) / n_total,
+        prob_std=float(__import__("numpy").std(probs)),
+        prob_min=min(probs),
+        prob_max=max(probs),
+        prob_q25=float(__import__("numpy").quantile(probs, 0.25)),
+        prob_q50=float(__import__("numpy").quantile(probs, 0.50)),
+        prob_q75=float(__import__("numpy").quantile(probs, 0.75)),
+        probs=probs,
+        labels=labels,
+        node_ids=tuple(range(100, 100 + n_total)),
+        prompt_mode="eval_head",
+        thinking_mode="non_thinking",
+        pooling_path="pool_last_valid_token",
+        uses_inference_mode=True,
+        distributed_gather="none",
+    )
+
+
+def _inputs(*, population: PopulationName, head_probs: tuple[float, ...], teacher_probs: tuple[float, ...], labels: tuple[int, ...], checkpoint: CheckpointProvenance = CHECKPOINT) -> FusionPopulationInputs:
+    report = _scorer_report(population=population, probs=head_probs, labels=labels, checkpoint=checkpoint)
+    return FusionPopulationInputs(
+        head_report=report,
+        teacher_probs=teacher_probs,
+        teacher_node_ids=report.node_ids,
+    )
+
+
+def test_formal_fusion_selects_alpha_on_validation_and_freezes_for_reporting():
+    validation_inputs = _inputs(
+        population=PopulationName.VALIDATION,
+        head_probs=(0.92, 0.18, 0.86, 0.12),
+        teacher_probs=(0.70, 0.35, 0.62, 0.30),
+        labels=(1, 0, 1, 0),
+    )
+    report_inputs = _inputs(
+        population=PopulationName.FINAL_TEST,
+        head_probs=(0.88, 0.24, 0.76, 0.22),
+        teacher_probs=(0.64, 0.40, 0.59, 0.36),
+        labels=(1, 0, 1, 0),
+    )
+    config = FusionEvalConfig(alpha_candidates=(0.0, 0.5, 1.0), min_student_alpha=0.25)
+
+    report = run_formal_fusion_eval(
+        validation_inputs=validation_inputs,
+        report_inputs=report_inputs,
+        config=config,
+    )
+
+    assert report.selection.optimal_alpha == pytest.approx(0.5)
+    assert report.selected_on_validation_only is True
+    assert report.validation_metrics.population.population_name == PopulationName.VALIDATION
+    assert report.report_metrics.population.population_name == PopulationName.FINAL_TEST
+    assert report.report_metrics.fusion.auprc == pytest.approx(1.0)
+    assert report.student_contribution_pass is True
+    assert report.selection.teacher_degradation_tolerance_triggered is False
+
+
+def test_student_contribution_pass_is_false_when_optimal_alpha_below_minimum():
+    validation_inputs = _inputs(
+        population=PopulationName.VALIDATION,
+        head_probs=(0.80, 0.35, 0.72, 0.30),
+        teacher_probs=(0.74, 0.38, 0.68, 0.34),
+        labels=(1, 0, 1, 0),
+    )
+    report_inputs = _inputs(
+        population=PopulationName.FINAL_TEST,
+        head_probs=(0.78, 0.36, 0.70, 0.29),
+        teacher_probs=(0.73, 0.37, 0.67, 0.33),
+        labels=(1, 0, 1, 0),
+    )
+    config = FusionEvalConfig(alpha_candidates=(0.0, 0.1, 0.2), min_student_alpha=0.25)
+
+    report = run_formal_fusion_eval(
+        validation_inputs=validation_inputs,
+        report_inputs=report_inputs,
+        config=config,
+    )
+
+    assert report.selection.optimal_alpha == pytest.approx(0.1)
+    assert report.student_contribution_pass is False
+
+
+def test_guardrail_fallback_sets_tolerance_triggered_when_no_candidate_passes():
+    validation_inputs = _inputs(
+        population=PopulationName.VALIDATION,
+        head_probs=(0.49, 0.51, 0.52, 0.48),
+        teacher_probs=(0.90, 0.10, 0.85, 0.15),
+        labels=(1, 0, 1, 0),
+    )
+    report_inputs = _inputs(
+        population=PopulationName.FINAL_TEST,
+        head_probs=(0.48, 0.52, 0.51, 0.49),
+        teacher_probs=(0.88, 0.12, 0.82, 0.18),
+        labels=(1, 0, 1, 0),
+    )
+    config = FusionEvalConfig(alpha_candidates=(0.5, 1.0), teacher_degradation_tolerance=0.0)
+
+    report = run_formal_fusion_eval(
+        validation_inputs=validation_inputs,
+        report_inputs=report_inputs,
+        config=config,
+    )
+
+    assert report.selection.teacher_degradation_tolerance_triggered is True
+    assert report.selection.secondary_guardrail_pass is False
+    assert report.student_contribution_pass is False
+
+
+def test_formal_fusion_requires_checkpoint_provenance():
+    valid_report = _scorer_report(
+        population=PopulationName.VALIDATION,
+        probs=(0.9, 0.1, 0.8, 0.2),
+        labels=(1, 0, 1, 0),
+    )
+    payload = valid_report.model_dump(mode="python")
+    payload.pop("checkpoint_provenance")
+
+    with pytest.raises(ValidationError):
+        FusionPopulationInputs(
+            head_report=payload,
+            teacher_probs=(0.8, 0.2, 0.7, 0.3),
+            teacher_node_ids=(100, 101, 102, 103),
+        )
+
+
+def test_formal_fusion_rejects_validation_as_report_population():
+    validation_inputs = _inputs(
+        population=PopulationName.VALIDATION,
+        head_probs=(0.9, 0.1, 0.8, 0.2),
+        teacher_probs=(0.8, 0.2, 0.7, 0.3),
+        labels=(1, 0, 1, 0),
+    )
+    report_inputs = _inputs(
+        population=PopulationName.VALIDATION,
+        head_probs=(0.7, 0.3, 0.75, 0.25),
+        teacher_probs=(0.75, 0.25, 0.72, 0.28),
+        labels=(1, 0, 1, 0),
+    )
+
+    with pytest.raises(ValueError, match="test-like"):
+        run_formal_fusion_eval(
+            validation_inputs=validation_inputs,
+            report_inputs=report_inputs,
+        )
