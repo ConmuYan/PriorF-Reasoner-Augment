@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,8 +68,18 @@ DATASETS = {
     },
 }
 
-ZERO_SHA = "0" * 40
-GIT_SHA_PLACEHOLDER = "0" * 40
+# Files that MUST match their committed HEAD content for the embedded
+# TeacherProvenance.code_git_sha to be a truthful audit anchor. Kept
+# deliberately small: only the teacher inference bridge, the canonical-mat
+# builder, this driver script, and the diagnostic. Anything outside this set
+# (unrelated tracked files) is allowed to be dirty without blocking the run.
+BRIDGE_FILES: tuple[str, ...] = (
+    "priorf_teacher/inference.py",
+    "scripts/legacy_mat_to_canonical.py",
+    "scripts/generate_teacher_exports.py",
+    "scripts/verify_teacher_metric_consistency.py",
+)
+
 GRAPH_REGIME = GraphRegime.TRANSDUCTIVE_STANDARD
 GRAPH_REGIME_STR = "transductive_standard"
 
@@ -79,6 +90,60 @@ def _file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _git_head_sha_or_fail(expected_clean_files: tuple[str, ...]) -> str:
+    """Return a 40-char hex git HEAD SHA or raise.
+
+    Fails closed (RuntimeError) if any of:
+      * git is unavailable or returns a non-zero exit status,
+      * HEAD SHA is not a 40-character lowercase hex string,
+      * any of ``expected_clean_files`` has an uncommitted diff relative to
+        HEAD (tracked modification, staged or unstaged, including rename /
+        delete / untracked-inside-tracked-dir).
+
+    The cleanliness check is intentionally narrow: it only asserts the
+    bridge files listed by the caller, not the full working tree. Files
+    outside ``expected_clean_files`` (e.g. IDE state, unrelated WIP) may
+    be dirty without blocking the run, because they cannot change the
+    behaviour of the code path that produces teacher artifacts.
+    """
+    try:
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            stderr=subprocess.PIPE,
+        ).decode("ascii").strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "cannot read git HEAD for TeacherProvenance.code_git_sha; "
+            "refusing to embed a zero-SHA placeholder"
+        ) from exc
+
+    if len(head) != 40 or any(c not in "0123456789abcdef" for c in head):
+        raise RuntimeError(
+            f"git HEAD is not a 40-char lowercase hex SHA: {head!r}"
+        )
+
+    try:
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain", "--", *expected_clean_files],
+            cwd=str(REPO_ROOT),
+            stderr=subprocess.PIPE,
+        ).decode("utf-8")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "cannot run `git status --porcelain` for bridge cleanliness check"
+        ) from exc
+
+    if status.strip():
+        raise RuntimeError(
+            "bridge tracked files are dirty relative to HEAD; refusing to "
+            "embed HEAD SHA in TeacherProvenance.code_git_sha.\n"
+            f"offending `git status --porcelain` output:\n{status}"
+        )
+
+    return head
 
 
 def _population_metadatas(
@@ -108,7 +173,14 @@ def generate_for_dataset(
     dataset_key: str,
     base_output_dir: Path,
     device: str = "cuda",
+    code_git_sha: str | None = None,
 ) -> None:
+    if code_git_sha is None or len(code_git_sha) != 40:
+        raise RuntimeError(
+            "generate_for_dataset requires a 40-char code_git_sha derived "
+            "from _git_head_sha_or_fail; zero-SHA placeholders are not "
+            "permitted after Task 2 runtime-acceptance commit."
+        )
     cfg = DATASETS[dataset_key]
     print(f"\n=== {dataset_key.upper()} ===")
 
@@ -175,21 +247,22 @@ def generate_for_dataset(
         # NOTE (Task 2 runtime acceptance, audit trail): metric_name / metric_threshold
         # below are operator hard-coded defaults. They are NOT prescribed by any
         # source-of-truth document (docs/010, docs/020 §10, docs/030 §Task 2
-        # Acceptance, docs/050). In particular, metric_threshold=0.80 is a single
+        # Acceptance, docs/050). metric_threshold=0.80 is a single
         # dataset-agnostic value and has no recorded calibration rationale.
-        # On YelpChi this threshold currently blocks artifact production at
-        # validation AUROC=0.7518 (see status_package/general.md §"Task 2
-        # 运行时验收"). A diagnostic under scripts/verify_teacher_metric_consistency.py
-        # exists to recompute (AUROC, AUPRC_trapezoidal, AUPRC_step) before any
-        # threshold / metric change is proposed. Do NOT edit the two lines below
-        # without (a) a verification-run log, and (b) a per-dataset rationale
-        # committed to status_package/general.md.
+        # As of 2026-04-22, both datasets clear this threshold comfortably
+        # (Amazon AUROC=0.9744, YelpChi AUROC=0.9867; see
+        # status_package/general.md §"Task 2 运行时验收" for the sha256-pinned
+        # baseline hashes of canonical .mat + checkpoint that produced these).
+        # scripts/verify_teacher_metric_consistency.py must be re-run if any of
+        # those hashes changes. Do NOT edit the two lines below without (a) a
+        # verification-run log, and (b) a per-dataset rationale committed to
+        # status_package/general.md.
         metric_name=MetricName.AUROC,
         metric_threshold=0.80,
         population_name=PopulationName.VALIDATION,
         validation_ground_truth_label=val_labels,
         validation_teacher_prob=val_probs,
-        code_git_sha=GIT_SHA_PLACEHOLDER,
+        code_git_sha=code_git_sha,
         report_path=str(report_path),
     )
     print(f"       AUROC={report.metric_value:.4f} passed={report.passed}")
@@ -202,7 +275,7 @@ def generate_for_dataset(
         pop_meta = populations_map[pop_str]
         pop_enum = recs[0].population_name
         provenance = TeacherProvenance(
-            code_git_sha=GIT_SHA_PLACEHOLDER,
+            code_git_sha=code_git_sha,
             teacher_checkpoint_path=cfg["checkpoint"],
             teacher_checkpoint_sha256=checkpoint_sha256,
             data_manifest_path=str(data_manifest_path),
@@ -250,9 +323,15 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve HEAD SHA once, fail-closed, before any artifact is written.
+    code_git_sha = _git_head_sha_or_fail(BRIDGE_FILES)
+    print(f"[provenance] code_git_sha = {code_git_sha}")
+
     datasets = list(DATASETS.keys()) if args.dataset == "all" else [args.dataset]
     for ds in datasets:
-        generate_for_dataset(ds, output_dir, device=args.device)
+        generate_for_dataset(
+            ds, output_dir, device=args.device, code_git_sha=code_git_sha
+        )
 
 
 if __name__ == "__main__":
