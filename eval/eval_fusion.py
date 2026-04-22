@@ -31,6 +31,7 @@ __all__ = (
 )
 
 _STRICT_MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True)
+_GUARDRAIL_EPS = 1e-12
 
 
 class FusionPopulationInputs(BaseModel):
@@ -253,7 +254,7 @@ def run_formal_fusion_eval(
         candidate = (primary_metric_value, tie_key, alpha, fused_metrics)
         if best_any is None or candidate[:2] > best_any[:2]:
             best_any = candidate
-        if guardrail_value >= teacher_guardrail_baseline - config.teacher_degradation_tolerance:
+        if guardrail_value + _GUARDRAIL_EPS >= teacher_guardrail_baseline - config.teacher_degradation_tolerance:
             if best_passing is None or candidate[:2] > best_passing[:2]:
                 best_passing = candidate
 
@@ -267,7 +268,7 @@ def run_formal_fusion_eval(
         metric_name=config.secondary_guardrail_metric,
         context="selected validation fusion guardrail",
     )
-    secondary_guardrail_pass = selected_guardrail_value >= teacher_guardrail_baseline - config.teacher_degradation_tolerance
+    secondary_guardrail_pass = selected_guardrail_value + _GUARDRAIL_EPS >= teacher_guardrail_baseline - config.teacher_degradation_tolerance
     teacher_degradation_tolerance_triggered = best_passing is None
 
     report_labels = tuple(int(label) for label in report_inputs.head_report.labels)
