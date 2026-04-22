@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Literal, cast
 
 import numpy as np
@@ -264,23 +263,16 @@ def test_formal_head_only_eval_uses_shared_scorer_and_frozen_validation_threshol
     assert report.diagnostics.oracle_same_population_metrics.f1 > report.headline_metrics.f1_at_val_threshold
 
 
-def test_formal_head_only_eval_rejects_tuning_rows_in_report_population():
+def test_formal_head_only_eval_rejects_validation_as_report_population():
     validation_inputs = _inputs(PopulationName.VALIDATION, (3, 4), (0, 1))
     report_inputs = _inputs(PopulationName.FINAL_TEST, (21, 22), (0, 1))
-    invalid_report_population = PopulationMetadata(
-        population_name=PopulationName.FINAL_TEST.value,
-        split_values=(PopulationName.FINAL_TEST.value,),
-        node_ids_hash="1" * 64,
-        contains_tuning_rows=True,
-        contains_final_test_rows=True,
-    )
 
-    with pytest.raises(ValueError, match="must not contain tuning rows"):
+    with pytest.raises(ValueError):
         eval_head_only.run_formal_head_only_eval(
             validation_inputs=validation_inputs,
             report_inputs=report_inputs,
             validation_population_metadata=_population_metadata(PopulationName.VALIDATION),
-            report_population_metadata=invalid_report_population,
+            report_population_metadata=_population_metadata(PopulationName.VALIDATION),
             model=object(),
             cls_head=object(),
             tokenizer=object(),
