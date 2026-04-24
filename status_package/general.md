@@ -20,7 +20,13 @@
 - Task 5 的目标是 Unified Head Scoring（validation 与 offline head-only eval 共用的 canonical predict_proba + 指标产出层）
 - Task 5 已实现 eval/head_scoring.py / eval/__init__.py 与 tests/test_head_scoring.py（21 条用例 / 25 test nodes）
 - Task 5 已通过对应测试并已提交
-- 当前准备进入 Task 6
+- Task 6 已完成并已人工审核通过（Validation/Offline Head Parity Test）
+- Task 7 已完成（canonical joint trainer：L_gen + L_cls + L_distill）
+- Task 8 已完成（formal eval suite：eval_head_only / eval_gen_only / eval_fusion / faithfulness）
+- Task 9 已完成（gate manifest + gate_check + formal launcher integration）
+- Task 11 已完成（teacher-probability ablation audit；prompts/11 专项任务）
+- Task 15 已完成（README + operator runbook + stage launchers + smoke tests）
+- prompts/ 下 15 个 task 的代码与 self-review 交付物均已落盘
 
 必须遵守的 source-of-truth 文件：
 - docs/010_project_contract.md
@@ -37,7 +43,7 @@
 - 若发现需求冲突、schema 漂移、silent default、threshold/alpha leakage、provenance 断裂，必须 fail closed
 
 当前任务：
-Task 6：Validation/Offline Head Parity Test（尚未开始）
+- 15-task 总规划已完成实现与自审；如需继续，下一步应落入真实 Qwen3-4B + LoRA 权重的端到端运行验收（docs/030 §Task 2 runtime acceptance 的完整闭环）、以及将"YelpChi 首次 artifact 写入 + Amazon 旧 artifact 覆写"这两项 operator follow-up 执行到位。
 
 已完成文件：
 - graph_data/mat_loader.py
@@ -70,6 +76,43 @@ Task 6：Validation/Offline Head Parity Test（尚未开始）
 - self-review/task3.md
 - self-review/task4.md
 - self-review/task5.md
+- self-review/task6.md
+- self-review/task7.md
+- self-review/task8.md
+- self-review/task9.md
+- self-review/task11.md
+- self-review/task15.md
+- tests/test_eval_head_parity.py
+- train/__init__.py
+- train/train_stage2_canonical.py
+- tests/test_canonical_trainer.py
+- eval/calibration.py
+- eval/eval_head_only.py
+- tests/test_eval_head_only.py
+- eval/eval_gen_only.py
+- llm/parsing.py
+- tests/test_eval_gen_only.py
+- tests/test_strict_output_schema.py
+- eval/eval_fusion.py
+- llm/fusion.py
+- tests/test_eval_fusion.py
+- eval/faithfulness.py
+- tests/test_faithfulness.py
+- schemas/__init__.py
+- schemas/gate_manifest.py
+- scripts/gate_check.py
+- scripts/run_full_pipeline.sh
+- tests/test_gate_check.py
+- tests/test_formal_launcher_gate.py
+- evidence/ablations.py
+- tests/test_teacher_prob_ablation.py
+- README.md（rewritten as operator-facing orientation）
+- docs/040_operator_runbook.md
+- scripts/run_smoke.sh
+- scripts/run_stage1.sh
+- scripts/run_stage2.sh
+- scripts/run_eval.sh
+- tests/test_smoke_pipeline.py
 
 Task 3 验收证据：
 - PYTHONPATH=. pytest -q tests/test_output_schema.py tests/test_evidence_schema.py tests/test_prompt_builder.py
@@ -174,12 +217,68 @@ Task 5 下游约束（由本 Task 选择固化，但归属 Task 6/7 承接，Tas
 - Task 6 parity test 必须用真 Qwen3 tokenizer 至少覆盖一条样本，以验证 apply_chat_template 的 4-kwarg 组合在真模型下行为与 DummyTokenizer 一致
 - Task 9 gate_check 必须校验 report.n_total == expected_population_size，以兜住 caller 忘记 pre-shard 导致 n_total 被 world_size 倍放大的情况
 
-Task 6 及以后尚未完成且不得视为已完成的事项：
-- tests/test_eval_head_parity.py（Task 6 parity：same prompt builder / chat template / token spans / hidden-state indices / probabilities / predictions）
-- train/train_stage2_canonical.py（Task 7 canonical joint trainer：L_gen + L_cls + L_distill 三项必须并存）
-- cls head 架构与持久化
-- canonical tokenization 模块（目前仅以 apply_chat_template 4-kwarg 形式 pin 在 score_head 内）
-- eval/eval_head_only.py / eval/eval_gen_only.py / eval/eval_fusion.py / eval/faithfulness.py（Task 8 formal eval runner）
-- validation-only threshold / alpha 选择
-- teacher-prob ablation 审计
-- scripts/gate_check.py + gate_manifest.json schema + launcher integration（Task 9）
+Task 6 验收证据（Validation/Offline Head Parity Test）：
+- tests/test_eval_head_parity.py 已提交（same prompt builder / chat template / token spans / hidden-state indices / probabilities / predictions）
+- self-review/task6.md 已提交
+
+Task 7 验收证据（canonical joint trainer：L_gen + L_cls + L_distill）：
+- train/__init__.py、train/train_stage2_canonical.py 已提交
+- tests/test_canonical_trainer.py 已提交
+- self-review/task7.md 已提交
+
+Task 8 验收证据（formal eval suite：prompts/10 + 12 + 13 + 14）：
+- eval/eval_head_only.py、eval/calibration.py（+ tests/test_eval_head_only.py 7 passed）
+- eval/eval_gen_only.py、llm/parsing.py（+ tests/test_eval_gen_only.py + tests/test_strict_output_schema.py 22 passed）
+- eval/eval_fusion.py、llm/fusion.py（+ tests/test_eval_fusion.py，cherry-pick 合入 commit 5465d0d 修复 fusion guardrail epsilon 与 test fixtures，全部通过）
+- eval/faithfulness.py（+ tests/test_faithfulness.py 6 passed；commit 3838099 锁定 faithfulness 到 score_head）
+- self-review/task8.md 已提交
+
+Task 9 验收证据（gate manifest + gate_check + launcher）：
+- schemas/__init__.py、schemas/gate_manifest.py（Pydantic 模型，extra="forbid"，frozen=True，hex40 commit、hex64 data_manifest_hash、UTC generated_at、9 项 *_pass）
+- scripts/gate_check.py（fail-closed gate 校验，任一 *_pass != True 抛 ValueError；CLI entrypoint）
+- scripts/run_full_pipeline.sh（formal/gated/diagnostic 硬分流；formal 必须 --gate-manifest 且 gate 通过才会 exec 用户命令；set -euo pipefail）
+- tests/test_gate_check.py、tests/test_formal_launcher_gate.py（合计 17 passed；原 commit e7d4987，cherry-pick 合入 main 作为 20316ef）
+- self-review/task9.md 已提交
+
+Task 11 验收证据（teacher-probability ablation audit；prompts/11）：
+- evidence/ablations.py（TEACHER_PROB_MASK sentinel、ablate_teacher_prob(card)、TeacherProbAblationAudit Pydantic 模型、run_teacher_prob_ablation_audit 纯函数；不触发 inference，不重选 threshold/alpha）
+- tests/test_teacher_prob_ablation.py（10 passed：schema 保持、重复 ablation 拒绝、checkpoint/population/path-audit 一致性、阈值边界、single-class 无虚构指标、frozen+extra=forbid）
+- self-review/task11.md 已提交
+- 相关 commit：9e41048
+
+Task 15 验收证据（README + operator runbook + stage launchers + smoke tests；prompts/15）：
+- README.md 已重写为 operator-facing 文档（三个 namespace 硬分流、什么算/不算 success、quick starts；旧 prompt-bundle 段落作为 "Prompt / task bundle" 子章节保留）
+- docs/040_operator_runbook.md 新增（shortest valid path + fail conditions 排查顺序 + cheat-sheet）
+- scripts/run_smoke.sh（diagnostic-only，set -euo pipefail，不接受 --mode）
+- scripts/run_stage1.sh / scripts/run_stage2.sh（gated 默认；带 --gate-manifest 提升 formal，gate 失败不退回 gated）
+- scripts/run_eval.sh（formal-only，强制 --gate-manifest，gate_check 前置）
+- tests/test_smoke_pipeline.py（9 passed：canonical Evidence Card + prompt round-trip、schema fail-closed、4 个 launcher 的 fail-closed 路由行为）
+- self-review/task15.md 已提交
+
+整体验收：
+- PYTHONPATH=. pytest tests/ -q → 216 passed（Task 1–15 全量，零回归）
+- docs/030 Task 1–9 + prompts/ Task 1–15 的实现与自审交付物均已落盘
+
+当前 canonical 路径（追加于 Task 6/7/8/11/15）：
+- tests/test_eval_head_parity.py（Task 6 parity）
+- train/__init__.py、train/train_stage2_canonical.py（Task 7 canonical trainer）
+- eval/calibration.py、eval/eval_head_only.py（Task 8 head-only formal runner）
+- eval/eval_gen_only.py、llm/parsing.py（Task 8 generation formal runner，strict vs normalized）
+- eval/eval_fusion.py、llm/fusion.py（Task 8 fusion formal runner，validation-only alpha）
+- eval/faithfulness.py（Task 8 faithfulness，复用 score_head）
+- evidence/ablations.py（Task 11 teacher-prob ablation audit）
+
+当前 formal 路径（追加于 Task 9/15）：
+- schemas/gate_manifest.py（GateManifest Pydantic 模型）
+- scripts/gate_check.py（fail-closed gate 校验入口）
+- scripts/run_full_pipeline.sh（formal/gated/diagnostic 硬分流 launcher）
+- scripts/run_eval.sh（formal-only wrapper）
+
+当前 diagnostic 路径（追加于 Task 15）：
+- scripts/run_smoke.sh + tests/test_smoke_pipeline.py（canonical plumbing smoke；不进 formal namespace）
+
+遗留 follow-up（与 15-task 代码交付无直接关联，但对真实发布必要）：
+- docs/030 §Task 2 runtime acceptance 的"YelpChi artifact 首次写入"与"Amazon 旧 artifact 以当前 canonical .mat + 已纳入 git 的 bridge 源码覆写"（status_package §Task 2 运行时验收已登记具体证据与原因）
+- 真实 Qwen3-4B + LoRA 权重下的端到端运行验收（当前所有 ScorerReport / FusionEvalReport / FaithfulnessReport 尚未在真实 backbone 产出）
+- generate_gate_manifest 工具（目前 gate_manifest 仍需人工组装；建议后续新增专用工具自动从各 eval report 抽取字段填充）
+- .gitignore 补齐 outputs/、assets/data/*_canonical.mat、priorf_gnn/、manifests/（历史条目）
