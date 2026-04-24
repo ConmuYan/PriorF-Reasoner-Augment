@@ -300,10 +300,43 @@ Pipeline smoke 运行时验收（真实 Qwen3-4B-Instruct-2507 + legacy teacher_
 
 5) End-to-end driver：scripts/run_full_stage2_pipeline.sh 串联上述 5 步（legacy→canonical→teacher_exports→train→inference→formal eval），接收 --dataset {amazon,yelpchi} + --qwen-path + 训练/评估规模参数；每一步出错立即 set -euo pipefail 退出，可审计
 
-运行时验收仍未覆盖（Follow-up，对真实发布必要但不在当前范围）：
-- 大规模 Stage 2 训练（真实发布需要 TRAIN 全量 × 更多 steps × 学习率调度 + best-checkpoint 选择；当前 run_v1 是 40 steps × 1024 samples，仅作为 pipeline proof-of-run，非收敛训练）
-- eval_gen_only / eval_fusion / faithfulness 三个 formal runner 的 CLI driver（需要 LLM 文本生成路径 + 解析，当前未实现 CLI；核心 library 函数已就绪）
-- gate_manifest 自动组装（需从各 eval report 抽字段，目前仍是人工拼装；建议下一步写 scripts/generate_gate_manifest.py）
+真实调参后训练验收（2026-04-24 post-QA，commit 797a641，run_v2，tmux sessions stage2-amazon-v2 / stage2-yelpchi-v2）：
+
+QA pass：
+- pyflakes + ruff F/B/UP/ARG 在新增的 5 个 driver 脚本上 0 issue（修复 1 处 unused import + 1 处 duplicate import）
+- 216/216 tests pass（无任何 canonical module / schema / test 被改动）
+- 调用契约核对：score_head / run_canonical_train_step / run_formal_head_only_eval / build_evidence_card 的 kwargs 全部对齐
+
+训练脚本调优（commit 797a641，全部在 scripts/run_stage2_train.py 内，不动 canonical）：
+- LR warmup + cosine schedule（transformers get_cosine_schedule_with_warmup）
+- LoRA targets 从 {q,v}_proj 扩展到 {q,k,v,o,gate,up,down}_proj（trainable 2.9M → 33M）
+- epoch-based 样本洗牌（取消随机重复采样）
+- 周期性 validation（run_validation_with_unified_scorer）+ 写入 train_log.jsonl
+- 新参数：--num-epochs / --warmup-ratio / --lr-scheduler / --lora-targets / --lora-dropout / --weight-decay / --validation-every-n-steps
+
+run_v2 调参训练（500 steps，bs=2，4096 samples cap，LR=1e-4 cosine+warmup=0.1，LoRA r=16 α=32，λ_cls=1.0 λ_distill=0.3）：
+- Amazon outputs/gated/stage2/amazon/run_v2/：validation AUROC 0.5584 → 0.9953 @ step 400（训练中监控），post-training validation (n=128) AUROC=0.9337
+- YelpChi outputs/gated/stage2/yelpchi/run_v2/：validation AUROC 0.5995 → 0.9701 @ step 500，post-training validation (n=128) AUROC=0.9797
+- L_gen 两端均从 ~2.75 下降到 ~0.31，平滑无剧烈抖动；prob_std 从 0.0010 → 0.0895 (Amazon) / 0.0585 (YelpChi)，恢复判别能力
+
+final_test head-only inference（scripts/run_stage2_inference.py，n=512 分层子集）：
+- Amazon: AUROC=0.9857 AUPRC=0.9051 Brier=0.0331 prob_std=0.0895（相对 run_v1 AUROC +48 绝对点）
+- YelpChi: AUROC=0.9429 AUPRC=0.7233 Brier=0.1097 prob_std=0.0545（AUROC +31 绝对点）
+
+Formal head-only eval（scripts/run_formal_head_only_eval.py，validation-frozen threshold 经 F1 选择）：
+- Amazon outputs/formal/head_only/amazon/formal_head_only_report_amazon.json
+  - val-frozen threshold=0.2082，final_test F1=0.8696 precision=0.8824 recall=0.8571 specificity=0.9916
+  - calibration: Brier=0.0331 ECE=0.0783 max_calibration_gap=0.5625
+- YelpChi outputs/formal/head_only/yelpchi/formal_head_only_report_yelpchi.json
+  - val-frozen threshold=0.1112，final_test F1=0.7368 precision=0.7179 recall=0.7568 specificity=0.9498
+  - calibration: Brier=0.1097 ECE=0.1035 max_calibration_gap=0.7890
+- 两个 FormalHeadOnlyReport 均通过 checkpoint_bundle cross-identity + population metadata + scorer provenance + validation threshold source + calibration population 的全部 Pydantic model_validator
+
+运行时验收仍未覆盖（对真实发布 / 论文级评估必要，不在当前 QA + 调参范围）：
+- 大规模 Stage 2 训练（当前 run_v2 = 500 步 × 4096 样本 cap，已达到高 AUROC 但仍有提升空间；TRAIN 全量 + more steps + best-checkpoint 选择是下一步）
+- 温度校准 / Platt scaling（ECE 0.08-0.10 + max_calibration_gap ~0.6-0.8 说明 head 判别强但未 calibrated，若 downstream fusion / gating 需 well-calibrated 概率则应加 validation 温度拟合）
+- eval_gen_only / eval_fusion / faithfulness 三个 formal runner 的 CLI driver（核心 library 函数已测试就绪；文本生成路径 CLI 未写）
+- gate_manifest 自动组装（目前仍是人工拼装；建议下一步写 scripts/generate_gate_manifest.py 从各 eval report 自动抽字段）
 
 当前 canonical 路径（追加于 Task 6/7/8/11/15）：
 - tests/test_eval_head_parity.py（Task 6 parity）
