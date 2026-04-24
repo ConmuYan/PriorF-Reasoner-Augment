@@ -275,10 +275,35 @@ Pipeline smoke 运行时验收（真实 Qwen3-4B-Instruct-2507 + legacy teacher_
   - 负向验证：任一 *_pass 置 False 时，gate_check exit=1 且 scripts/run_eval.sh 同步 exit=1（不创建 outputs/formal/，fail-closed 合同生效）
   - scripts/run_eval.sh --gate-manifest ... → gate_check PASS → 建立 outputs/formal/ 命名空间、设置 PRIORF_OUTPUT_NAMESPACE=formal / PRIORF_OUTPUT_DIR=outputs/formal
 
-运行时验收尚未覆盖的部分（真实发布前需要）：
-- 真实 Stage 2 多步训练 + checkpoint + validation-window dataloader（scripts/run_stage2_train_smoke.py 只跑 1 步 smoke；正式 trainer loop 需要 wrap run_canonical_train_step 但不得绕开 require_* 字段）
-- 真实 canonical TeacherExportRecord parquet + DataManifest 的重新生成（当前 smoke 走 legacy parquet + diagnostic 合成 DataManifest；正式 formal 跑需先执行 scripts/legacy_mat_to_canonical.py + scripts/generate_teacher_exports.py 完整再跑一轮）
-- 真实 eval_head_only / eval_gen_only / eval_fusion / faithfulness 四大 formal runner 的端到端 report（目前仅 head_scoring 通路已在真实 Qwen3-4B 上验证）
+真实 End-to-End 运行验收（2026-04-24，commit eaefd59，Qwen3-4B-Instruct-2507 + 真实 canonical teacher_exports）：
+
+1) canonical teacher_exports 重新产出：
+- scripts/legacy_mat_to_canonical.py → Amazon_canonical.mat / YelpChi_canonical.mat 落盘
+- scripts/generate_teacher_exports.py → 双数据集各 3 个 population 的 canonical parquet + data_manifest + baseline_report 全部通过 _git_head_sha_or_fail 的 HEAD sha 校验（code_git_sha=eaefd594...）
+  - outputs/gated/teacher_exports/amazon/{train,validation,final_test}/teacher_export.parquet  (8360/1194/2390 records；validation AUROC=0.9744 passed=True)
+  - outputs/gated/teacher_exports/yelpchi/{train,validation,final_test}/teacher_export.parquet (32167/4595/9192 records；validation AUROC=0.9867 passed=True)
+  - manifests/amazon/data_manifest.json, manifests/yelpchi/data_manifest.json
+
+2) Stage 2 训练（scripts/run_stage2_train.py wrap run_canonical_train_step）：
+- Amazon：outputs/gated/stage2/amazon/run_v1/，40 steps bs=2，1024-sample cap，LoRA r=8 α=16 on {q_proj,v_proj} + gradient checkpointing；损失从 L_gen=2.77 L_cls=2.12 L_distill=1.28 total=5.53 降到 L_gen=1.81 L_cls=0.06 L_distill=0.36 total=2.05，post-training validation (n=128) AUROC=0.5756
+- YelpChi：outputs/gated/stage2/yelpchi/run_v1/，同配置；损失 total=5.37→2.17，post-training validation (n=128) AUROC=0.6328
+- 两次运行都保存了 peft_adapter/ + cls_head.pt + run_record.json + train_log.jsonl；CanonicalStepReport 与 CanonicalTrainerRunRecord 全部通过 Pydantic 校验
+
+3) Head-only inference（scripts/run_stage2_inference.py wrap score_head，加载已保存 adapter + cls_head）：
+- Amazon final_test (n=256): auroc=0.5093, auprc=0.0882, brier=0.0654，ScorerReport 写入 outputs/gated/eval/amazon/scorer_report_amazon_final_test.json
+- YelpChi final_test (n=256): auroc=0.6287, auprc=0.1889, brier=0.1229，ScorerReport 写入 outputs/gated/eval/yelpchi/scorer_report_yelpchi_final_test.json
+
+4) Formal head-only eval（scripts/run_formal_head_only_eval.py wrap run_formal_head_only_eval）：
+- Amazon outputs/formal/head_only/amazon/formal_head_only_report_amazon.json，validation-frozen threshold=0.0647，final_test auroc=0.5093 auprc=0.0882 f1@val_thr=0.1053 precision=0.0690 recall=0.2222
+- YelpChi outputs/formal/head_only/yelpchi/formal_head_only_report_yelpchi.json，validation-frozen threshold=0.1394，final_test auroc=0.6287 auprc=0.1889 f1@val_thr=0.1818 precision=0.1750 recall=0.1892
+- FormalHeadOnlyReport 全字段（checkpoint_bundle cross-identity + population metadata 对齐 + validation_threshold.source=validation + scorer_checkpoint_provenance==cls_head bundle + calibration population match）均通过 Pydantic model_validator
+
+5) End-to-end driver：scripts/run_full_stage2_pipeline.sh 串联上述 5 步（legacy→canonical→teacher_exports→train→inference→formal eval），接收 --dataset {amazon,yelpchi} + --qwen-path + 训练/评估规模参数；每一步出错立即 set -euo pipefail 退出，可审计
+
+运行时验收仍未覆盖（Follow-up，对真实发布必要但不在当前范围）：
+- 大规模 Stage 2 训练（真实发布需要 TRAIN 全量 × 更多 steps × 学习率调度 + best-checkpoint 选择；当前 run_v1 是 40 steps × 1024 samples，仅作为 pipeline proof-of-run，非收敛训练）
+- eval_gen_only / eval_fusion / faithfulness 三个 formal runner 的 CLI driver（需要 LLM 文本生成路径 + 解析，当前未实现 CLI；核心 library 函数已就绪）
+- gate_manifest 自动组装（需从各 eval report 抽字段，目前仍是人工拼装；建议下一步写 scripts/generate_gate_manifest.py）
 
 当前 canonical 路径（追加于 Task 6/7/8/11/15）：
 - tests/test_eval_head_parity.py（Task 6 parity）

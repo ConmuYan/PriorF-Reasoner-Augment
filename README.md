@@ -100,6 +100,56 @@ scripts/run_eval.sh --gate-manifest outputs/gated/gate_manifest.json -- \
 
 Every launcher respects `--output-root DIR` (default `outputs`).
 
+## End-to-end pipeline on real Qwen3-4B + Amazon / YelpChi
+
+The `scripts/run_full_stage2_pipeline.sh` driver chains the five stages
+required to go from raw legacy `.mat` files to a formal head-only eval
+report on one dataset:
+
+1. `scripts/legacy_mat_to_canonical.py` - legacy CIKM 2020 `.mat` ->
+   canonical `x`/`ground_truth_label`/`split_vector`/`relation_*` `.mat`.
+2. `scripts/generate_teacher_exports.py` - runs `LGHGCLNetV2` inference
+   on the canonical `.mat`, writes validated
+   `outputs/gated/teacher_exports/<ds>/<pop>/teacher_export.parquet`
+   (TRAIN / VALIDATION / FINAL_TEST) + `DataManifest` +
+   `TeacherBaselineReport`.  Fail-closed `_git_head_sha_or_fail` pins a
+   real commit sha into every `TeacherProvenance`.
+3. `scripts/run_stage2_train.py` - multi-step canonical joint trainer:
+   Qwen3-4B backbone + PEFT LoRA adapter on `{q_proj, v_proj}` +
+   activation checkpointing + trainable linear `cls_head`, running
+   `run_canonical_train_step` in a loop.  Saves `peft_adapter/` +
+   `cls_head.pt` + `CanonicalTrainerRunRecord` + per-step JSONL log.
+4. `scripts/run_stage2_inference.py` - head-only scoring on
+   `final_test`: loads PEFT adapter + `cls_head.pt`, builds canonical
+   `EvidenceCards` via `build_evidence_card`, runs `score_head`, writes
+   a `ScorerReport` under `outputs/gated/eval/<ds>/`.
+5. `scripts/run_formal_head_only_eval.py` - formal head-only eval:
+   validation-only F1 threshold freezing + frozen-threshold headline
+   metrics on `final_test` + calibration summary + optional oracle
+   diagnostics.  Writes `FormalHeadOnlyReport` under
+   `outputs/formal/head_only/<ds>/`.
+
+Run the whole chain for one dataset:
+
+```bash
+bash scripts/run_full_stage2_pipeline.sh \
+  --dataset amazon \
+  --qwen-path /data1/mq/models/Qwen3-4B-Instruct-2507 \
+  --max-steps 40 --batch-size 2 \
+  --max-train-samples 1024 \
+  --validation-subset 128 --final-test-subset 256 \
+  --gpu-index 0
+```
+
+Use `--skip-teacher-exports` to reuse cached parquets for rapid
+experimentation over different training recipes.
+
+For a quick plumbing smoke that does **not** require canonical teacher
+exports, `scripts/run_head_only_smoke.py` and
+`scripts/run_stage2_train_smoke.py` operate on the legacy
+`assets/teacher_exports/*.parquet` and write only under
+`outputs/diagnostic/`.
+
 ## Prompt / task bundle
 
 Historical prompt bundle used to bring the project up to the current
