@@ -1,14 +1,109 @@
-# PriorF-Reasoner Codex / OMX Prompt Bundle
+# PriorF-Reasoner
 
-本压缩包包含两类内容：
+Fail-closed training and evaluation harness for a compact language model
+that reads teacher-derived structural Evidence Cards and produces
+auditable fraud-detection probabilities + strict-schema rationales.
 
-1. `codex_operation_guide.md`
-   - 面向配置了 Codex / OMX（oh-my-codex）的实际操作教程
-   - 包括建议工作模式、任务切片方式、审核节奏、建议命令
+This README is the top-level orientation.  Operators looking for a
+concrete runbook go to `docs/040_operator_runbook.md`; developers
+looking for contracts go to `docs/010_project_contract.md`,
+`docs/020_top_level_design.md`, `docs/030_harness_agent_execution_guide.md`,
+and `docs/050_fail_closed_guardrails.md`.
 
-2. `prompts/`
-   - 可直接复制给 Codex / Harness Agent 的 prompts
-   - 包括总控启动 prompt、Task 1~15、审查 prompt、收尾 prompt
+## What the system is (and is not)
+
+**Is.** A harness around a compact student LM + classification head that:
+
+* consumes schema-validated Evidence Cards built from a pretrained
+  PriorF teacher,
+* is trained canonically with generation + classification + distillation
+  losses under Accelerate,
+* is evaluated formally with frozen validation thresholds / alpha and
+  gated by an executable `gate_manifest.json`.
+
+**Is not.** A drop-in LLM for raw graph input, a generic "LLM-replaces-GNN"
+claim, or a system whose head metrics can be trusted without the formal
+eval path in this repo.
+
+## Three output namespaces
+
+Every launcher writes under exactly one of:
+
+* `outputs/diagnostic/` — smoke runs, exploratory probes, paraphrased
+  parse audits. Never counts as a formal result.
+* `outputs/gated/` — canonical training checkpoints that have not yet
+  cleared the full gate manifest. Used for parity checks and gate
+  evidence generation; not reported as formal metrics.
+* `outputs/formal/` — only reachable via `scripts/run_full_pipeline.sh
+  --mode formal --gate-manifest PATH` with a passing
+  `scripts/gate_check.py`. Every field of `GateManifest` must be `True`.
+
+Silent fallbacks between namespaces are forbidden. A failing gate
+manifest causes the formal launcher to exit non-zero without creating
+any `outputs/formal/` directory.
+
+## What counts as success
+
+A green run is only considered valid if **all** of the following hold:
+
+* `scripts/gate_check.py` passes a complete `gate_manifest.json`
+  (every required gate is `True`),
+* head / fusion / gen-only / faithfulness reports are produced via the
+  modules in `eval/` (not reimplemented downstream),
+* teacher-probability ablation audit (`evidence.ablations`) does **not**
+  flag `teacher_prob_dependency_high` above the agreed threshold for
+  the reported population,
+* fusion reports `student_contribution_pass = True` at the selected
+  `optimal_alpha`,
+* strict-schema parse rate (`eval/eval_gen_only.py`) is the headline
+  parse metric; normalized parse rate is diagnostic only.
+
+## What explicitly does not count as success
+
+* **Teacher fallback is not student success.** A fusion whose
+  `optimal_alpha` collapses to `0.0` means the student contributes
+  nothing; the system is reporting the teacher, not the student.
+  `student_contribution_pass` must be `True`.
+* **Low-alpha fusion is not success.** Even an `optimal_alpha` near
+  zero that nominally beats either branch alone is not a valid "fusion
+  works" claim; `min_student_alpha` in `FusionEvalConfig` is there to
+  enforce this.
+* **Normalized parse is not schema compliance.** Only
+  `strict_schema_parse_rate` counts as schema compliance. Normalized /
+  alias parsers live exclusively in the diagnostic path.
+* **Oracle same-population thresholds are not formal metrics.** Any
+  report that tunes a decision threshold on the rows it is reporting
+  is, by construction, diagnostic.
+* **Small-sample faithfulness is not formal faithfulness.** Faithfulness
+  below the minimum sample size is marked as smoke / diagnostic and
+  does not enter the gate manifest.
+
+## One-line quick starts
+
+The launchers are thin wrappers over `scripts/run_full_pipeline.sh`.
+Each forwards to the right output namespace:
+
+```bash
+# Fail-closed smoke check on canonical plumbing (diagnostic namespace only).
+scripts/run_smoke.sh
+
+# Stage 1 (TRL SFT structured-generation training) in gated namespace.
+scripts/run_stage1.sh -- python -m train.stage1_sft ...
+
+# Stage 2 (canonical Accelerate trainer: L_gen + L_cls + L_distill) in gated namespace.
+scripts/run_stage2.sh -- python -m train.train_stage2_canonical ...
+
+# Formal evaluation.  Requires a valid gate manifest; gate_check runs first.
+scripts/run_eval.sh --gate-manifest outputs/gated/gate_manifest.json -- \
+    python -m eval.eval_head_only ...
+```
+
+Every launcher respects `--output-root DIR` (default `outputs`).
+
+## Prompt / task bundle
+
+Historical prompt bundle used to bring the project up to the current
+15-task contract:
 
 ## 建议使用方式
 
