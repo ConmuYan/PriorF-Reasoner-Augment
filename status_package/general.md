@@ -259,6 +259,27 @@ Task 15 验收证据（README + operator runbook + stage launchers + smoke tests
 - PYTHONPATH=. pytest tests/ -q → 216 passed（Task 1–15 全量，零回归）
 - docs/030 Task 1–9 + prompts/ Task 1–15 的实现与自审交付物均已落盘
 
+Pipeline smoke 运行时验收（真实 Qwen3-4B-Instruct-2507 + legacy teacher_exports parquet，diagnostic namespace）：
+- scripts/run_head_only_smoke.py（legacy parquet → EvidenceCard adapter → build_prompt → Qwen3-4B forward(output_hidden_states=True) → pool_last_valid_token → random linear cls_head → sigmoid → ScorerReport；outputs/diagnostic/head_only_smoke/）
+  - amazon subset_size=8：SMOKE OK，ScorerReport 通过 Pydantic 校验（n_total=8/pos=1/neg=7，is_single_class=False，auroc/auprc/brier 全部有限，prob 分布 7 项齐全）
+  - amazon subset_size=64：SMOKE OK（n_total=64/pos=4/neg=60）
+  - yelpchi subset_size=64：SMOKE OK（n_total=64/pos=9/neg=55）
+  - 说明：cls_head 未经 Stage 2 训练，AUROC/AUPRC/Brier 数值不可作为质量评估，仅证明 prompt→chat_template→forward→pool→head→sigmoid→ScorerReport 端到端路径在真实 Qwen3-4B 权重下打通
+- scripts/run_stage2_train_smoke.py（Qwen3-4B + PEFT LoRA r=8/alpha=16 on {q_proj, v_proj} + trainable linear cls_head + AdamW + Accelerator.backward；调用 run_canonical_train_step 1 步）
+  - amazon batch_size=2：STAGE2 SMOKE OK，CanonicalStepReport 通过 Pydantic 校验（L_gen=2.8172/L_cls=1.2260/L_distill=1.3588/total=4.7225，total = L_gen + 1.0*L_cls + 0.5*L_distill 的 1e-5 恒等式满足，backward_via_accelerate=True）
+  - yelpchi batch_size=2：STAGE2 SMOKE OK（L_gen=2.8496/L_cls=1.1300/L_distill=2.2258/total=5.0926）
+  - 说明：trainable/total=2,949,120/4,025,417,216；LoRA 正确冻结 99.93% 参数，L_gen + L_cls + L_distill 反向传播与优化器步都成功，无 NaN
+- scripts/run_smoke.sh（diagnostic-only launcher）：9 passed / 0.77s，tests/test_smoke_pipeline.py 全绿
+- Gate manifest + formal launcher 通路（outputs/gated/manifests/gate_manifest.json 的合成示例）：
+  - scripts/gate_check.py --manifest-path ... → gate_check: PASS（9 个 *_pass 全 True 时）
+  - 负向验证：任一 *_pass 置 False 时，gate_check exit=1 且 scripts/run_eval.sh 同步 exit=1（不创建 outputs/formal/，fail-closed 合同生效）
+  - scripts/run_eval.sh --gate-manifest ... → gate_check PASS → 建立 outputs/formal/ 命名空间、设置 PRIORF_OUTPUT_NAMESPACE=formal / PRIORF_OUTPUT_DIR=outputs/formal
+
+运行时验收尚未覆盖的部分（真实发布前需要）：
+- 真实 Stage 2 多步训练 + checkpoint + validation-window dataloader（scripts/run_stage2_train_smoke.py 只跑 1 步 smoke；正式 trainer loop 需要 wrap run_canonical_train_step 但不得绕开 require_* 字段）
+- 真实 canonical TeacherExportRecord parquet + DataManifest 的重新生成（当前 smoke 走 legacy parquet + diagnostic 合成 DataManifest；正式 formal 跑需先执行 scripts/legacy_mat_to_canonical.py + scripts/generate_teacher_exports.py 完整再跑一轮）
+- 真实 eval_head_only / eval_gen_only / eval_fusion / faithfulness 四大 formal runner 的端到端 report（目前仅 head_scoring 通路已在真实 Qwen3-4B 上验证）
+
 当前 canonical 路径（追加于 Task 6/7/8/11/15）：
 - tests/test_eval_head_parity.py（Task 6 parity）
 - train/__init__.py、train/train_stage2_canonical.py（Task 7 canonical trainer）

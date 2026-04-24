@@ -20,3 +20,12 @@ build/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime artifact namespaces (diagnostic / gated / formal)
+outputs/
+
+# Canonical .mat regeneration cache
+assets/data/*_canonical.mat
+
+# Teacher repo drop-in
+priorf_gnn/
