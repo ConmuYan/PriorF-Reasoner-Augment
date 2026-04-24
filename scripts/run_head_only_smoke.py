@@ -55,9 +55,14 @@ from evidence.evidence_schema import (  # noqa: E402
     TaskInstruction,
     TeacherSummary,
 )
-from priorf_teacher.schema import NeighborSummary, RelationProfile  # noqa: E402
 from evidence.prompt_builder import ThinkingMode  # noqa: E402
-from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName  # noqa: E402
+from priorf_teacher.schema import (  # noqa: E402
+    DatasetName,
+    GraphRegime,
+    NeighborSummary,
+    PopulationName,
+    RelationProfile,
+)
 
 
 _HSD_QUANTILE_MAP: Final[dict[str, float]] = {

@@ -42,7 +42,6 @@ from eval.head_scoring import (  # noqa: E402
     CheckpointProvenance,
     HeadScoringInputs,
     HeadScoringSample,
-    score_head,
 )
 from evidence.evidence_schema import build_evidence_card  # noqa: E402
 from evidence.output_schema import PredLabel  # noqa: E402
@@ -154,7 +153,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data-manifest", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path,
                         help="Output directory (e.g. outputs/gated/stage2/<dataset>/<run_id>).")
-    parser.add_argument("--max-steps", type=int, default=50)
+    parser.add_argument("--num-epochs", type=int, default=None,
+                        help="Epochs over TRAIN. If set, --max-steps is computed as "
+                             "ceil(num_epochs * n_train / batch_size). One of "
+                             "--num-epochs / --max-steps must be given.")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Explicit optimizer steps. Overrides --num-epochs when both set.")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -162,14 +166,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lambda-distill", type=float, default=0.5)
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=16)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument("--lora-targets", nargs="+",
+                        default=["q_proj", "k_proj", "v_proj", "o_proj",
+                                 "gate_proj", "up_proj", "down_proj"],
+                        help="PEFT LoRA target_modules (default covers attention + MLP).")
+    parser.add_argument("--warmup-ratio", type=float, default=0.1,
+                        help="Fraction of total steps used for linear warmup.")
+    parser.add_argument("--lr-scheduler", choices=["cosine", "linear", "constant"],
+                        default="cosine")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--max-train-samples", type=int, default=None,
                         help="Optional cap on number of TRAIN records (for faster smoke).")
     parser.add_argument("--validation-subset", type=int, default=128,
                         help="If --teacher-export-validation is set, run score_head on this many "
-                             "validation rows at the end (stratified).")
+                             "validation rows periodically and at the end (stratified).")
+    parser.add_argument("--validation-every-n-steps", type=int, default=0,
+                        help="Run validation every N steps during training. 0 disables.")
     parser.add_argument("--thinking-mode", choices=["non_thinking"], default="non_thinking")
     return parser.parse_args(argv)
 
@@ -200,6 +216,40 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         _build_training_sample(r, data_manifest) for r in train_records
     )
 
+    if args.max_steps is None and args.num_epochs is None:
+        raise ValueError("one of --max-steps / --num-epochs must be provided")
+    iters_per_epoch = max(1, len(train_samples) // args.batch_size)
+    if args.max_steps is not None:
+        total_steps = int(args.max_steps)
+    else:
+        total_steps = int(args.num_epochs) * iters_per_epoch
+    if total_steps < 1:
+        raise ValueError(f"total_steps must be >= 1; got {total_steps}")
+    warmup_steps = max(1, int(round(total_steps * max(0.0, args.warmup_ratio))))
+    print(
+        f"       iters_per_epoch={iters_per_epoch}  total_steps={total_steps}  "
+        f"warmup_steps={warmup_steps}  lr_scheduler={args.lr_scheduler}",
+        flush=True,
+    )
+
+    # Pre-select a stratified validation subset used for periodic monitoring.
+    val_records_for_monitor: tuple = ()
+    if args.teacher_export_validation is not None and args.validation_every_n_steps > 0:
+        val_records_full = read_teacher_export_artifact(args.teacher_export_validation)
+        pos = [r for r in val_records_full if int(r.ground_truth_label) == 1]
+        neg = [r for r in val_records_full if int(r.ground_truth_label) == 0]
+        want_pos = max(1, int(round(args.validation_subset * len(pos) / max(1, len(val_records_full)))))
+        want_pos = min(want_pos, len(pos))
+        want_neg = min(args.validation_subset - want_pos, len(neg))
+        val_records_for_monitor = tuple(
+            rng.sample(pos, want_pos) + rng.sample(neg, want_neg)
+        )
+        print(
+            f"       preloaded {len(val_records_for_monitor)} validation records "
+            f"for periodic monitoring (every {args.validation_every_n_steps} steps)",
+            flush=True,
+        )
+
     print(f"[3/7] Loading Qwen3 checkpoint on {device_str}: {args.qwen_path}", flush=True)
     from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
@@ -210,13 +260,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         attn_implementation="eager",
     )
 
-    print(f"[4/7] Wrapping with PEFT LoRA (r={args.lora_r}, alpha={args.lora_alpha})", flush=True)
+    print(
+        f"[4/7] Wrapping with PEFT LoRA (r={args.lora_r}, alpha={args.lora_alpha}, "
+        f"dropout={args.lora_dropout}, targets={args.lora_targets})",
+        flush=True,
+    )
     from peft import LoraConfig, get_peft_model  # noqa: E402
 
     lora_cfg = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
-        target_modules=["q_proj", "v_proj"],
+        lora_dropout=args.lora_dropout,
+        target_modules=list(args.lora_targets),
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -240,7 +295,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad] + list(cls_head.parameters()),
         lr=args.learning_rate,
+        weight_decay=args.weight_decay,
     )
+
+    from transformers import (  # noqa: E402
+        get_constant_schedule_with_warmup,
+        get_cosine_schedule_with_warmup,
+        get_linear_schedule_with_warmup,
+    )
+    if args.lr_scheduler == "cosine":
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
+        )
+    elif args.lr_scheduler == "linear":
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
+        )
+    else:
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer, num_warmup_steps=warmup_steps,
+        )
 
     config = CanonicalTrainerConfig(
         dataset_name=dataset_enum,
@@ -249,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         output_dir=str(output_dir),
         learning_rate=args.learning_rate,
         train_batch_size=args.batch_size,
-        max_steps=args.max_steps,
+        max_steps=total_steps,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         lambda_cls=args.lambda_cls,
         lambda_distill=args.lambda_distill,
@@ -257,15 +331,34 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         thinking_mode=ThinkingMode.NON_THINKING,
     )
 
-    print(f"[5/7] Running {args.max_steps} canonical training steps...", flush=True)
+    print(
+        f"[5/7] Running {total_steps} canonical training steps "
+        f"(epochs ~= {total_steps // iters_per_epoch if iters_per_epoch else 0}, "
+        f"warmup={warmup_steps})...",
+        flush=True,
+    )
     from accelerate import Accelerator  # noqa: E402
 
     accelerator = Accelerator()
     train_log_path = output_dir / _TRAIN_LOG_NAME
     train_log_f = train_log_path.open("w", encoding="utf-8")
     last_step_report: CanonicalStepReport | None = None
-    for step in range(args.max_steps):
-        batch_indices = [rng.randrange(len(train_samples)) for _ in range(args.batch_size)]
+
+    # Epoch-level shuffling: each epoch yields a new permutation.  The
+    # canonical trainer operates one step at a time, but we materialize
+    # batches from a shuffled list to avoid the prior random-with-replacement
+    # sampling that duplicated positives / negatives unevenly.
+    epoch_indices: list[int] = []
+    for step in range(total_steps):
+        if not epoch_indices:
+            epoch_indices = list(range(len(train_samples)))
+            rng.shuffle(epoch_indices)
+        batch_indices = [epoch_indices.pop() for _ in range(min(args.batch_size, len(epoch_indices)))]
+        while len(batch_indices) < args.batch_size:
+            if not epoch_indices:
+                epoch_indices = list(range(len(train_samples)))
+                rng.shuffle(epoch_indices)
+            batch_indices.append(epoch_indices.pop())
         batch_samples = tuple(train_samples[i] for i in batch_indices)
         batch = CanonicalTrainingBatch(samples=batch_samples)
         step_report = run_canonical_train_step(
@@ -277,9 +370,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             optimizer=optimizer,
             accelerator=accelerator,
         )
+        # Advance LR scheduler AFTER the optimizer step so the newly set
+        # learning rate applies to the NEXT step.  This preserves standard
+        # PyTorch warmup behaviour (step 0 sees near-zero LR during warmup).
+        scheduler.step()
         last_step_report = step_report
+        current_lr = float(scheduler.get_last_lr()[0])
         log_row = {
             "step": step,
+            "lr": current_lr,
             "L_gen": step_report.generation_loss,
             "L_cls": step_report.classification_loss,
             "L_distill": step_report.distillation_loss,
@@ -287,15 +386,59 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         }
         train_log_f.write(json.dumps(log_row) + "\n")
         train_log_f.flush()
-        if step == 0 or (step + 1) % max(1, args.max_steps // 10) == 0 or step == args.max_steps - 1:
+        if step == 0 or (step + 1) % max(1, total_steps // 20) == 0 or step == total_steps - 1:
             print(
-                f"       step {step + 1:>4}/{args.max_steps}: "
+                f"       step {step + 1:>4}/{total_steps}: "
+                f"lr={current_lr:.2e} "
                 f"L_gen={step_report.generation_loss:.4f} "
                 f"L_cls={step_report.classification_loss:.4f} "
                 f"L_distill={step_report.distillation_loss:.4f} "
                 f"total={step_report.total_loss:.4f}",
                 flush=True,
             )
+        # Periodic in-loop validation using the pre-loaded monitor subset.
+        if (
+            val_records_for_monitor
+            and args.validation_every_n_steps > 0
+            and (step + 1) % args.validation_every_n_steps == 0
+        ):
+            model.eval()
+            cls_head.eval()
+            monitor_provenance = CheckpointProvenance(
+                path=str((output_dir / _CLS_HEAD_NAME).resolve()),
+                step=step + 1,
+                content_hash="m" * 64,  # interim monitor (not promoted)
+            )
+            monitor_inputs = _build_head_scoring_inputs(
+                val_records_for_monitor,
+                data_manifest,
+                population=PopulationName.VALIDATION,
+                checkpoint_provenance=monitor_provenance,
+            )
+            monitor_report = run_validation_with_unified_scorer(
+                validation_inputs=monitor_inputs,
+                model=model,
+                cls_head=cls_head,
+                tokenizer=tokenizer,
+                thinking_mode=ThinkingMode.NON_THINKING,
+                accelerator=None,
+            )
+            print(
+                f"       [val@{step + 1}]  auroc={monitor_report.auroc}  "
+                f"auprc={monitor_report.auprc}  brier={monitor_report.brier_score:.4f}  "
+                f"prob_std={monitor_report.prob_std:.4f}",
+                flush=True,
+            )
+            train_log_f.write(json.dumps({
+                "step": step,
+                "validation_auroc": monitor_report.auroc,
+                "validation_auprc": monitor_report.auprc,
+                "validation_brier": monitor_report.brier_score,
+                "validation_prob_std": monitor_report.prob_std,
+            }) + "\n")
+            train_log_f.flush()
+            model.train()
+            cls_head.train(True)
     train_log_f.close()
     assert last_step_report is not None
 
