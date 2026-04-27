@@ -87,8 +87,10 @@ Each forwards to the right output namespace:
 # Fail-closed smoke check on canonical plumbing (diagnostic namespace only).
 scripts/run_smoke.sh
 
-# Stage 1 (TRL SFT structured-generation training) in gated namespace.
+# Stage 1 (structured-generation SFT) in gated namespace.
 scripts/run_stage1.sh -- python -m train.stage1_sft ...
+# Writes a gated LoRA adapter + run_record.json; current Stage 2 still starts
+# from the base Qwen checkpoint unless explicitly extended in a later round.
 
 # Stage 2 (canonical Accelerate trainer: L_gen + L_cls + L_distill) in gated namespace.
 scripts/run_stage2.sh -- python -m train.train_stage2_canonical ...

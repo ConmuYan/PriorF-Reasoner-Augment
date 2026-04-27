@@ -9,8 +9,21 @@ from pydantic import ValidationError
 
 from eval.eval_fusion import FusionEvalConfig, FusionPopulationInputs, run_formal_fusion_eval
 from evidence.prompt_builder import ThinkingMode
+from evidence.leakage_policy import formal_leakage_provenance_fields
 from eval.head_scoring import CheckpointProvenance, ScorerReport
 from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
+
+
+
+def _score_head_audit_kwargs() -> dict[str, str]:
+    return {
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
+
+def _formal_report_provenance_kwargs() -> dict:
+    return formal_leakage_provenance_fields(**_score_head_audit_kwargs())
 
 
 CHECKPOINT = CheckpointProvenance(
@@ -31,6 +44,9 @@ def _scorer_report(*, population: PopulationName, probs: tuple[float, ...], labe
         dataset_name=DatasetName.AMAZON,
         population_name=population,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        run_id="run-123",
+        report_split=population,
+        eval_type="head_scoring",
         checkpoint_provenance=checkpoint,
         scorer_schema_version="head_scorer/v1",
         n_total=n_total,
@@ -55,6 +71,7 @@ def _scorer_report(*, population: PopulationName, probs: tuple[float, ...], labe
         pooling_path="pool_last_valid_token",
         uses_inference_mode=True,
         distributed_gather="none",
+        **_formal_report_provenance_kwargs(),
     )
 
 
@@ -86,6 +103,8 @@ def test_formal_fusion_selects_alpha_on_validation_and_freezes_for_reporting():
         validation_inputs=validation_inputs,
         report_inputs=report_inputs,
         config=config,
+        run_id="run-123",
+        **_score_head_audit_kwargs(),
     )
 
     assert report.selection.optimal_alpha == pytest.approx(0.5)
@@ -95,6 +114,30 @@ def test_formal_fusion_selects_alpha_on_validation_and_freezes_for_reporting():
     assert report.selection.primary_metric_value > report.selection.teacher_primary_metric_value
     assert report.student_contribution_pass is True
     assert report.selection.teacher_degradation_tolerance_triggered is False
+    assert report.dataset_name == DatasetName.AMAZON
+    assert report.graph_regime == GraphRegime.TRANSDUCTIVE_STANDARD
+    assert report.run_id == "run-123"
+    assert report.eval_type == "fusion"
+    assert report.validation_split == PopulationName.VALIDATION
+    assert report.report_split == PopulationName.FINAL_TEST
+    assert report.selected_alpha == pytest.approx(report.selection.optimal_alpha)
+
+    old_payload = report.model_dump(mode="python")
+    for field_name in (
+        "leakage_policy_version",
+        "neighbor_label_policy",
+        "evidence_card_projection",
+        "student_visible_forbidden_fields",
+        "teacher_prob_masked",
+        "teacher_logit_masked",
+        "neighbor_label_counts_visible",
+        "formal_safe_result",
+        "prompt_audit_path",
+        "prompt_audit_hash",
+    ):
+        old_payload.pop(field_name, None)
+    with pytest.raises(ValidationError):
+        type(report).model_validate(old_payload)
 
 
 def test_student_contribution_pass_is_false_when_optimal_alpha_below_minimum():
@@ -116,6 +159,8 @@ def test_student_contribution_pass_is_false_when_optimal_alpha_below_minimum():
         validation_inputs=validation_inputs,
         report_inputs=report_inputs,
         config=config,
+        run_id="run-123",
+        **_score_head_audit_kwargs(),
     )
 
     assert report.selection.optimal_alpha == pytest.approx(0.1)
@@ -141,6 +186,8 @@ def test_guardrail_fallback_sets_tolerance_triggered_when_no_candidate_passes():
         validation_inputs=validation_inputs,
         report_inputs=report_inputs,
         config=config,
+        run_id="run-123",
+        **_score_head_audit_kwargs(),
     )
 
     assert report.selection.teacher_degradation_tolerance_triggered is True
@@ -183,4 +230,6 @@ def test_formal_fusion_rejects_validation_as_report_population():
         run_formal_fusion_eval(
             validation_inputs=validation_inputs,
             report_inputs=report_inputs,
+            run_id="run-123",
+            **_score_head_audit_kwargs(),
         )

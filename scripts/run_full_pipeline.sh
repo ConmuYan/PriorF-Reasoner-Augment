@@ -4,6 +4,7 @@ set -euo pipefail
 mode=""
 gate_manifest=""
 output_root="outputs"
+python_bin="${PYTHON:-}"
 
 usage() {
   cat <<'EOF'
@@ -50,13 +51,23 @@ if [[ -z "$mode" ]]; then
   exit 1
 fi
 
+if [[ -z "$python_bin" ]]; then
+  if [[ $# -gt 0 && "$(basename "$1")" == python* ]]; then
+    python_bin="$1"
+  elif command -v python >/dev/null 2>&1; then
+    python_bin="python"
+  else
+    python_bin="python3"
+  fi
+fi
+
 case "$mode" in
   formal)
     if [[ -z "$gate_manifest" ]]; then
       echo "run_full_pipeline: formal mode requires --gate-manifest" >&2
       exit 1
     fi
-    python scripts/gate_check.py --manifest-path "$gate_manifest"
+    "$python_bin" scripts/gate_check.py --manifest-path "$gate_manifest"
     namespace_dir="$output_root/formal"
     ;;
   gated)

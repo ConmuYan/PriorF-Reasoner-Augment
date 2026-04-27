@@ -37,11 +37,15 @@ from eval.head_scoring import (  # noqa: E402
     ScorerReport,
     score_head,
 )
-from evidence.evidence_schema import build_evidence_card  # noqa: E402
-from evidence.prompt_builder import ThinkingMode  # noqa: E402
+from evidence.evidence_schema import build_student_evidence_card  # noqa: E402
+from evidence.prompt_builder import PromptMode, ThinkingMode  # noqa: E402
 from graph_data.manifests import load_data_manifest  # noqa: E402
 from priorf_teacher.export_pipeline import read_teacher_export_artifact  # noqa: E402
 from priorf_teacher.schema import PopulationName  # noqa: E402
+from scripts._formal_eval_helpers import (  # noqa: E402
+    build_eval_prompt_audit_entries,
+    write_prompt_audit_artifact,
+)
 
 
 class _LinearClsHead(torch.nn.Module):
@@ -112,7 +116,7 @@ def main(argv=None) -> int:
     print("[2/6] Building canonical EvidenceCards + scoring samples...", flush=True)
     samples = []
     for record in records:
-        card = build_evidence_card(teacher_record=record, data_manifest=data_manifest)
+        card = build_student_evidence_card(teacher_record=record, data_manifest=data_manifest)
         samples.append(
             HeadScoringSample(
                 evidence_card=card,
@@ -127,7 +131,7 @@ def main(argv=None) -> int:
     tokenizer = AutoTokenizer.from_pretrained(str(args.qwen_path))
     base_model = AutoModelForCausalLM.from_pretrained(
         str(args.qwen_path),
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation="eager",
     )
 
@@ -159,6 +163,21 @@ def main(argv=None) -> int:
         graph_regime=records[0].graph_regime,
         checkpoint_provenance=checkpoint_provenance,
     )
+    prompt_audit_path, prompt_audit_hash, _ = write_prompt_audit_artifact(
+        output_path=args.output_dir / f"prompt_audit_head_scoring_{args.dataset}_{args.population}.json",
+        dataset=args.dataset,
+        eval_type="head_scoring",
+        entries=build_eval_prompt_audit_entries(
+            tuple(records),
+            data_manifest,
+            population=PopulationName(args.population),
+            mode=PromptMode.EVAL_HEAD,
+            thinking_mode=ThinkingMode.NON_THINKING,
+            include_assistant_target=False,
+            location_prefix=args.population,
+        ),
+        extra={"population": args.population, "subset_size": args.subset_size},
+    )
 
     print(f"[6/6] Running score_head on {len(samples)} samples...", flush=True)
     report: ScorerReport = score_head(
@@ -167,6 +186,8 @@ def main(argv=None) -> int:
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=ThinkingMode.NON_THINKING,
+        prompt_audit_path=str(prompt_audit_path.resolve()),
+        prompt_audit_hash=prompt_audit_hash,
         accelerator=None,
     )
 
@@ -180,6 +201,8 @@ def main(argv=None) -> int:
         "cls_head_sha256": cls_head_sha256,
         "teacher_export": str(args.teacher_export),
         "data_manifest": str(args.data_manifest),
+        "prompt_audit_path": str(prompt_audit_path.resolve()),
+        "prompt_audit_hash": prompt_audit_hash,
         "subset_size": args.subset_size,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
     }

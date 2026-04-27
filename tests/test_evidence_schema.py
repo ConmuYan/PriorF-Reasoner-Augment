@@ -10,9 +10,11 @@ from evidence.evidence_schema import (
     DiscrepancySummary,
     EvidenceAblationMask,
     EvidenceCard,
+    STUDENT_PROMPT_ABLATION_MASK,
     TaskInstruction,
     TeacherSummary,
     build_evidence_card,
+    build_student_evidence_card,
 )
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
@@ -149,6 +151,22 @@ def test_ablation_mask_sets_nullable_values_to_none_and_requires_unmasked_values
     payload["teacher_summary"]["teacher_prob"] = None
     with pytest.raises(ValidationError, match="unmasked field"):
         EvidenceCard.model_validate(payload)
+
+
+def test_student_evidence_card_masks_direct_teacher_score_shortcuts():
+    card = build_student_evidence_card(teacher_record=_teacher_record(), data_manifest=_manifest())
+
+    assert card.ablation_mask == STUDENT_PROMPT_ABLATION_MASK
+    assert card.evidence_card_projection == "student_safe_v1"
+    assert card.teacher_summary.teacher_prob is None
+    assert card.teacher_summary.teacher_logit is None
+    assert card.teacher_summary.hsd_quantile is not None
+    assert card.teacher_summary.mlp_logit is not None
+    assert card.teacher_summary.gnn_logit is not None
+    dumped = card.model_dump(mode="json")
+    assert dumped["neighbor_summary"] == {"total_neighbors": 4}
+    for forbidden in ("labeled_neighbors", "positive_neighbors", "negative_neighbors", "unlabeled_neighbors"):
+        assert forbidden not in dumped["neighbor_summary"]
 
 
 def test_relation_and_neighbor_ablation_targets_are_explicit_enum_values():

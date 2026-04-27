@@ -47,6 +47,13 @@ QWEN3_LOCAL_PATH = Path("/data1/mq/models/Qwen3-4B-Instruct-2507")
 HIDDEN_DIM = 5
 
 
+def _score_head_audit_kwargs() -> dict[str, str]:
+    return {
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
+
 @dataclass
 class ParityTrace:
     prompt_modes: list[PromptMode] = field(default_factory=list)
@@ -246,6 +253,7 @@ def _run_score_with_trace(monkeypatch: pytest.MonkeyPatch, inputs: HeadScoringIn
         cls_head=TraceClsHead(trace),
         tokenizer=TraceTokenizer(trace),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     return report, trace
 

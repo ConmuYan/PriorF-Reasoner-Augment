@@ -24,9 +24,11 @@ max_steps=40
 batch_size=2
 max_train_samples=1024
 validation_subset=128
+validation_every_n_steps=50
 final_test_subset=256
 gpu_index=0
 run_id=""
+checkpoint_source="best_checkpoint"
 skip_regenerate_exports=0
 output_root="."
 
@@ -43,9 +45,13 @@ Optional:
   --batch-size N           per-step samples (default: 2)
   --max-train-samples N    cap on TRAIN rows used (default: 1024)
   --validation-subset N    eval validation rows (default: 128)
+  --validation-every-n-steps N
+                           periodic validation interval used for best-checkpoint
+                           selection (default: 50)
   --final-test-subset N    eval final_test rows (default: 256)
   --gpu-index N            GPU index (default: 0)
   --run-id RUN             identifier suffix (default: <dataset>_run_v1)
+  --checkpoint-source SRC  final_checkpoint or best_checkpoint (default: best_checkpoint)
   --skip-teacher-exports   reuse existing outputs/gated/teacher_exports/... + manifests/...
   --output-root DIR        where outputs/ and manifests/ live (default: .)
 EOF
@@ -59,9 +65,11 @@ while [[ $# -gt 0 ]]; do
     --batch-size) batch_size="$2"; shift 2 ;;
     --max-train-samples) max_train_samples="$2"; shift 2 ;;
     --validation-subset) validation_subset="$2"; shift 2 ;;
+    --validation-every-n-steps) validation_every_n_steps="$2"; shift 2 ;;
     --final-test-subset) final_test_subset="$2"; shift 2 ;;
     --gpu-index) gpu_index="$2"; shift 2 ;;
     --run-id) run_id="$2"; shift 2 ;;
+    --checkpoint-source) checkpoint_source="$2"; shift 2 ;;
     --skip-teacher-exports) skip_regenerate_exports=1; shift ;;
     --output-root) output_root="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
@@ -81,10 +89,14 @@ fi
 if [[ -z "$run_id" ]]; then
   run_id="${dataset}_run_v1"
 fi
+if [[ "$checkpoint_source" != "best_checkpoint" && "$checkpoint_source" != "final_checkpoint" ]]; then
+  echo "--checkpoint-source must be best_checkpoint or final_checkpoint" >&2
+  exit 1
+fi
 
 commit="$(git -C "$output_root" rev-parse HEAD 2>/dev/null || git rev-parse HEAD)"
 export PYTHONPATH="${output_root}:${output_root}/priorf_gnn:${PYTHONPATH:-}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$gpu_index}"
 
 train_parquet="$output_root/outputs/gated/teacher_exports/$dataset/train/teacher_export.parquet"
@@ -129,30 +141,34 @@ python "$output_root/scripts/run_stage2_train.py" \
   --batch-size "$batch_size" \
   --max-train-samples "$max_train_samples" \
   --validation-subset "$validation_subset" \
+  --validation-every-n-steps "$validation_every_n_steps" \
   --gpu-index 0
 
 config_fp="$(python -c "import json; print(json.load(open('$stage2_dir/run_record.json'))['_runtime_provenance']['config_fingerprint_sha256'])")"
+checkpoint_dir="$stage2_dir/$checkpoint_source"
+checkpoint_step="$(python -c "import json; print(json.load(open('$checkpoint_dir/run_record.json'))['checkpoint_provenance']['step'])")"
 
 echo "[step 4/5] Head-only inference on final_test ($dataset)"
 python "$output_root/scripts/run_stage2_inference.py" \
   --dataset "$dataset" \
   --qwen-path "$qwen_path" \
-  --peft-adapter "$stage2_dir/peft_adapter" \
-  --cls-head "$stage2_dir/cls_head.pt" \
+  --peft-adapter "$checkpoint_dir/peft_adapter" \
+  --cls-head "$checkpoint_dir/cls_head.pt" \
   --teacher-export "$test_parquet" \
   --data-manifest "$data_manifest" \
   --population final_test \
   --output-dir "$eval_dir" \
   --subset-size "$final_test_subset" \
-  --step "$max_steps" \
+  --step "$checkpoint_step" \
   --gpu-index 0
 
 echo "[step 5/5] Formal head-only eval ($dataset) -> outputs/formal/head_only/$dataset/"
 python "$output_root/scripts/run_formal_head_only_eval.py" \
   --dataset "$dataset" \
   --qwen-path "$qwen_path" \
-  --peft-adapter "$stage2_dir/peft_adapter" \
-  --cls-head "$stage2_dir/cls_head.pt" \
+  --peft-adapter "$checkpoint_dir/peft_adapter" \
+  --cls-head "$checkpoint_dir/cls_head.pt" \
+  --checkpoint-source "$checkpoint_source" \
   --teacher-export-validation "$val_parquet" \
   --teacher-export-final-test "$test_parquet" \
   --data-manifest "$data_manifest" \
@@ -162,7 +178,7 @@ python "$output_root/scripts/run_formal_head_only_eval.py" \
   --run-id "$run_id" \
   --commit "$commit" \
   --config-fingerprint "$config_fp" \
-  --step "$max_steps" \
+  --step "$checkpoint_step" \
   --include-oracle-diagnostics \
   --gpu-index 0
 

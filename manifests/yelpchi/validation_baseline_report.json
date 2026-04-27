@@ -1,0 +1,14 @@
+{
+  "dataset_name": "yelpchi",
+  "teacher_model_name": "LGHGCLNetV2",
+  "teacher_checkpoint_sha256": "bfc5d1bde3b2479cee6fa75254bdef076c2b2595bc94ab5b48e4fca0f78a9441",
+  "graph_regime": "transductive_standard",
+  "population_name": "validation",
+  "metric_name": "auroc",
+  "metric_value": 0.9867476658600294,
+  "threshold": 0.8,
+  "passed": true,
+  "data_manifest_sha256": "68c81ef7ed0a06622cca1a32a88de6d3aca899b757ce4f374073af1adad3d3a6",
+  "code_git_sha": "eaefd5946c823ec22c8f6191553fc1cdaa5a89d1",
+  "export_timestamp_utc": "2026-04-24T04:49:52.918771Z"
+}

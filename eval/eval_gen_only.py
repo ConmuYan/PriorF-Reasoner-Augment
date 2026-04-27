@@ -10,14 +10,27 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Final, Literal
+from typing import Literal
 
 import numpy as np
 import sklearn.metrics
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError, model_validator
 
 from evidence.evidence_schema import EvidenceCard
-from evidence.output_schema import PredLabel, StrictOutput, parse_strict
+from evidence.leakage_policy import (
+    EVIDENCE_CARD_PROJECTION,
+    FORMAL_SAFE_RESULT,
+    HEX64_PATTERN,
+    LEAKAGE_POLICY_VERSION,
+    NEIGHBOR_LABEL_COUNTS_VISIBLE,
+    NEIGHBOR_LABEL_POLICY,
+    STUDENT_VISIBLE_FORBIDDEN_FIELD_PATHS,
+    TEACHER_LOGIT_MASKED,
+    TEACHER_PROB_MASKED,
+    formal_leakage_provenance_fields,
+    validate_formal_leakage_payload,
+)
+from evidence.output_schema import StrictOutput, parse_strict
 from llm.parsing import NormalizedParseError, parse_normalized_output
 from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
 
@@ -58,9 +71,12 @@ class GenOnlyEvalInputs(BaseModel):
     dataset_name: DatasetName
     population_name: PopulationName
     graph_regime: GraphRegime
+    run_id: StrictStr = Field(min_length=1)
     teacher_conditioned: Literal[True] = True
     strict_parse_failure_policy: Literal["penalty_mode"] = "penalty_mode"
     gen_eval_schema_version: Literal["gen_eval/v1"] = _GEN_EVAL_SCHEMA_VERSION
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
 
     @model_validator(mode="after")
     def _samples_consistent_with_header(self) -> "GenOnlyEvalInputs":
@@ -89,6 +105,9 @@ class GenOnlyEvalReport(BaseModel):
     dataset_name: DatasetName
     population_name: PopulationName
     graph_regime: GraphRegime
+    run_id: StrictStr = Field(min_length=1)
+    report_split: PopulationName
+    eval_type: Literal["gen_only"]
     gen_eval_schema_version: Literal["gen_eval/v1"]
     teacher_conditioned: Literal[True]
     prompt_mode: Literal["eval_gen"]
@@ -119,11 +138,28 @@ class GenOnlyEvalReport(BaseModel):
     node_ids: tuple[int, ...]
     strict_parse_succeeded: tuple[bool, ...]
     normalized_parse_succeeded: tuple[bool, ...]
+    leakage_policy_version: Literal["evidence_leakage_policy/v1"]
+    neighbor_label_policy: Literal["removed_from_student_visible"]
+    evidence_card_projection: Literal["student_safe_v1"]
+    student_visible_forbidden_fields: tuple[str, ...]
+    teacher_prob_masked: Literal[True]
+    teacher_logit_masked: Literal[True]
+    neighbor_label_counts_visible: Literal[False]
+    formal_safe_result: Literal[True]
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
+
+    @model_validator(mode="after")
+    def _formal_leakage_fields_consistent(self) -> "GenOnlyEvalReport":
+        validate_formal_leakage_payload(self.model_dump(mode="python"), context="GenOnlyEvalReport")
+        return self
 
     @model_validator(mode="after")
     def _counts_and_arrays_consistent(self) -> "GenOnlyEvalReport":
         if self.n_positive + self.n_negative != self.n_total:
             raise ValueError("n_positive + n_negative must equal n_total")
+        if self.report_split != self.population_name:
+            raise ValueError("report_split must match population_name")
         for field_name in (
             "probs",
             "labels",
@@ -204,6 +240,9 @@ def evaluate_gen_only(*, inputs: GenOnlyEvalInputs) -> GenOnlyEvalReport:
         dataset_name=inputs.dataset_name,
         population_name=inputs.population_name,
         graph_regime=inputs.graph_regime,
+        run_id=inputs.run_id,
+        report_split=inputs.population_name,
+        eval_type="gen_only",
         gen_eval_schema_version=inputs.gen_eval_schema_version,
         teacher_conditioned=True,
         prompt_mode="eval_gen",
@@ -229,6 +268,10 @@ def evaluate_gen_only(*, inputs: GenOnlyEvalInputs) -> GenOnlyEvalReport:
         node_ids=tuple(int(value) for value in node_ids_np.tolist()),
         strict_parse_succeeded=tuple(strict_success_mask),
         normalized_parse_succeeded=tuple(normalized_success_mask),
+        **formal_leakage_provenance_fields(
+            prompt_audit_path=inputs.prompt_audit_path,
+            prompt_audit_hash=inputs.prompt_audit_hash,
+        ),
     )
 
 
@@ -247,9 +290,7 @@ def _try_parse_normalized(text: str) -> StrictOutput | None:
 
 
 def _predicted_positive_probability(output: StrictOutput) -> float:
-    if output.label == PredLabel.FRAUD:
-        return float(output.score)
-    return float(1.0 - output.score)
+    return float(output.score)
 
 
 def _worst_case_positive_probability(ground_truth_label: Literal[0, 1]) -> float:

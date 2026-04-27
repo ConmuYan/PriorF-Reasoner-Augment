@@ -29,3 +29,10 @@ assets/data/*_canonical.mat
 
 # Teacher repo drop-in
 priorf_gnn/
+
+# Local Codex/task/audit scratch
+.codex/
+check/
+task/
+todo.md
+.codex

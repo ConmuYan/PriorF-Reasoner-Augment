@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from evidence.evidence_schema import EvidenceAblationMask, build_evidence_card
+from evidence.evidence_schema import EvidenceAblationMask, build_evidence_card, build_student_evidence_card
 from evidence.output_schema import PredLabel, StrictOutput, canonical_serialize
 from evidence.prompt_builder import FewShotExample, PromptMode, ThinkingMode, build_prompt
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
@@ -80,6 +80,10 @@ def _card(**kwargs):
     return build_evidence_card(teacher_record=_record(), data_manifest=_manifest(), **kwargs)
 
 
+def _student_card():
+    return build_student_evidence_card(teacher_record=_record(), data_manifest=_manifest())
+
+
 def _target(label: PredLabel = PredLabel.FRAUD) -> StrictOutput:
     return StrictOutput(
         rationale="example rationale",
@@ -114,6 +118,39 @@ def test_train_mode_assistant_content_is_canonical_serialized_target():
     assert bundle.sft_target_label is not None
     assert bundle.messages[-1].role == "assistant"
     assert bundle.messages[-1].content == canonical_serialize(bundle.sft_target_label)
+    assert "teacher_prob" not in bundle.messages[-1].content
+    assert "discrepancy_severity" in bundle.messages[-1].content
+    assert "positive_neighbors" not in bundle.messages[-1].content
+    assert "negative_neighbors" not in bundle.messages[-1].content
+    assert "labeled_neighbors" not in bundle.messages[-1].content
+    assert "neighbor_labels" not in bundle.messages[-1].content
+    assert "neighborhood_size" in bundle.messages[-1].content
+
+
+def test_train_mode_compacts_numeric_fields_in_sft_target() -> None:
+    card = build_evidence_card(
+        teacher_record=_record(
+            hsd_quantile=0.123456789,
+            branch_gap=1.23456789,
+            relation_profile=_relation_profile().model_copy(update={"mean_relation_discrepancy": 433.7027587890625}),
+        ),
+        data_manifest=_manifest(),
+    )
+    bundle = build_prompt(
+        evidence_card=card,
+        mode=PromptMode.TRAIN,
+        thinking_mode=ThinkingMode.NON_THINKING,
+        ground_truth_label_for_sft=PredLabel.FRAUD,
+        score_target_for_sft=0.950001,
+    )
+    assistant = bundle.messages[-1].content
+
+    assert "hsd_quantile=0.1235" in assistant
+    assert "branch_gap=1.2346" in assistant
+    assert "relation_discrepancy_mean=433.7028" in assistant
+    assert '"score":0.95' in assistant
+    assert "0.123456789" not in assistant
+    assert "433.7027587890625" not in assistant
 
 
 def test_non_train_modes_have_empty_assistant_and_no_sft_target():
@@ -209,3 +246,33 @@ def test_prompt_related_environment_variables_fail_closed(monkeypatch, env_key):
     monkeypatch.setenv(env_key, "1")
     with pytest.raises(RuntimeError, match="environment override"):
         build_prompt(evidence_card=_card(), mode=PromptMode.VALIDATION, thinking_mode=ThinkingMode.NON_THINKING)
+
+
+def test_student_safe_prompts_omit_forbidden_neighbor_fields_and_phrases():
+    forbidden = (
+        "labeled_neighbors",
+        "positive_neighbors",
+        "negative_neighbors",
+        "unlabeled_neighbors",
+        "positive neighbor",
+        "negative neighbor",
+        "labeled neighbor",
+        "fraud neighbor",
+        "benign neighbor",
+        "neighbor label",
+        "neighbor fraud ratio",
+        "neighbor positive ratio",
+    )
+    for mode in (PromptMode.TRAIN, PromptMode.EVAL_HEAD, PromptMode.EVAL_GEN):
+        kwargs = {}
+        if mode == PromptMode.TRAIN:
+            kwargs = {"ground_truth_label_for_sft": PredLabel.FRAUD, "score_target_for_sft": 0.87}
+        bundle = build_prompt(
+            evidence_card=_student_card(),
+            mode=mode,
+            thinking_mode=ThinkingMode.NON_THINKING,
+            **kwargs,
+        )
+        text = "\n".join(message.content for message in bundle.messages).lower()
+        for needle in forbidden:
+            assert needle not in text

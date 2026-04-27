@@ -11,6 +11,7 @@ def _write_manifest(tmp_path: Path, *, passed: bool) -> Path:
     path = tmp_path / "gate_manifest.json"
     payload = {
         "schema_version": "gate_manifest/v1",
+        "dataset_name": "amazon",
         "graph_regime": "transductive_standard",
         "commit": "a" * 40,
         "generated_at": datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc).isoformat(),
@@ -25,6 +26,29 @@ def _write_manifest(tmp_path: Path, *, passed: bool) -> Path:
         "smoke_pipeline_pass": passed,
         "teacher_prob_ablation_pass": passed,
         "population_contract_pass": passed,
+        "leakage_audit_pass": passed,
+        "leakage_policy_version": "evidence_leakage_policy/v1",
+        "neighbor_label_policy": "removed_from_student_visible",
+        "evidence_card_projection": "student_safe_v1",
+        "student_visible_forbidden_fields": ["neighbor_summary.labeled_neighbors", "neighbor_summary.positive_neighbors", "neighbor_summary.negative_neighbors", "neighbor_summary.unlabeled_neighbors"],
+        "teacher_prob_masked": True,
+        "teacher_logit_masked": True,
+        "neighbor_label_counts_visible": False,
+        "formal_safe_result": True,
+        "provenance": {
+            "run_id": "amazon_run_v2",
+            "data_manifest_path": "outputs/gated/data_manifest_amazon.json",
+            "teacher_baseline_report": {"path": "outputs/gated/teacher_baseline_amazon.json", "exists": True, "sha256": "c" * 64},
+            "head_only_report": {"path": "outputs/formal/head_only/formal_head_only_report_amazon.json", "exists": True, "sha256": "d" * 64},
+            "fusion_report": {"path": "outputs/formal/fusion/formal_fusion_report_amazon.json", "exists": True, "sha256": "e" * 64},
+            "gen_only_report": {"path": "outputs/formal/gen_only/formal_gen_only_report_amazon.json", "exists": True, "sha256": "f" * 64},
+            "faithfulness_report": {"path": "outputs/formal/faithfulness/faithfulness_report_amazon.json", "exists": True, "sha256": "1" * 64},
+            "prompt_audit_path": "outputs/gated/prompt_audit.json",
+            "prompt_audit_hash": "3" * 64,
+            "generator_command": "python scripts/generate_gate_manifest.py --dataset amazon",
+            "generator_git_commit": "2" * 40,
+            "generator_git_dirty": False,
+        },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

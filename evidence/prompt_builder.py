@@ -7,6 +7,7 @@ IO, and dependency imports from transformers/torch/accelerate/peft/trl/datasets.
 
 from __future__ import annotations
 
+import math
 import os
 from enum import Enum
 from typing import Final, Literal
@@ -109,6 +110,7 @@ def build_prompt(
         if ground_truth_label_for_sft is None or score_target_for_sft is None:
             raise ValueError("train mode requires ground_truth_label_for_sft and score_target_for_sft")
         target = _build_sft_target(
+            evidence_card=validated_card,
             label=PredLabel(ground_truth_label_for_sft),
             score=score_target_for_sft,
         )
@@ -128,22 +130,71 @@ def build_prompt(
         few_shot_examples=validated_examples,
         assistant_content=assistant_content,
     )
-    return PromptBundle(
+    bundle = PromptBundle(
         messages=messages,
         sft_target_label=target,
         mode=validated_mode,
         thinking_mode=validated_thinking_mode,
     )
+    from evidence.prompt_audit import assert_prompt_audit_passes, audit_prompt_bundle
+
+    assert_prompt_audit_passes(audit_prompt_bundle(bundle))
+    return bundle
 
 
-def _build_sft_target(*, label: PredLabel, score: float) -> StrictOutput:
-    return StrictOutput(
-        rationale="The structured graph evidence should be considered before assigning the training target.",
-        evidence=("Evidence Card fields are the only permitted basis for this structured target.",),
-        pattern_hint="Use the declared graph-regime structural pattern; no raw text or raw graph matrix is available.",
-        label=label,
-        score=score,
+def _build_sft_target(*, evidence_card: EvidenceCard, label: PredLabel, score: float) -> StrictOutput:
+    discrepancy = evidence_card.discrepancy_summary
+    relation = evidence_card.relation_profile
+    teacher = evidence_card.teacher_summary
+    rationale = (
+        "Reasoning uses non-score structural signals from the Evidence Card: "
+        f"hsd_quantile={_compact_numeric(teacher.hsd_quantile)}, "
+        f"branch_gap={_compact_numeric(teacher.branch_gap)}, "
+        f"discrepancy_severity={discrepancy.discrepancy_severity}, "
+        f"route_hint={discrepancy.route_hint}, active_relations={relation.active_relations}, "
+        f"total_neighbors={evidence_card.neighbor_summary.total_neighbors}."
     )
+    return StrictOutput(
+        rationale=rationale,
+        evidence=(
+            f"discrepancy_severity={discrepancy.discrepancy_severity}; route_hint={discrepancy.route_hint}",
+            f"relation_discrepancy_mean={_compact_numeric(relation.mean_relation_discrepancy)}; "
+            f"active_relations={relation.active_relations}",
+            f"neighborhood_size={evidence_card.neighbor_summary.total_neighbors}",
+        ),
+        pattern_hint=(
+            f"{evidence_card.graph_regime.value}; hsd_quantile={_compact_numeric(teacher.hsd_quantile)}; "
+            f"branch_gap_abs={_compact_numeric(discrepancy.branch_gap_abs)}"
+        ),
+        label=label,
+        score=_rounded_score(score),
+    )
+
+
+def _compact_numeric(value: float | int | None) -> str:
+    if value is None:
+        raise ValueError("SFT target fields must not be None")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError("SFT target numeric fields must be finite")
+    if numeric.is_integer():
+        return str(int(numeric))
+    compact = f"{numeric:.4f}".rstrip("0").rstrip(".")
+    if compact == "-0":
+        return "0"
+    return compact
+
+
+def _rounded_score(score: float) -> float:
+    numeric = float(score)
+    if not math.isfinite(numeric):
+        raise ValueError("score_target_for_sft must be finite")
+    rounded = round(numeric, 4)
+    return min(1.0, max(0.0, rounded))
 
 
 def _build_messages(
@@ -159,6 +210,10 @@ def _build_messages(
             content=(
                 "You are PriorF-Reasoner. Produce exactly one strict JSON object with keys "
                 "rationale, evidence, pattern_hint, label, score in that order. "
+                "The first character must be '{' and the final character must be '}'. "
+                "Do not output markdown, code fences, preamble text, or trailing text. "
+                "Use double-quoted JSON strings, keep rationale / evidence / pattern_hint concise, "
+                "use label exactly 'fraud' or 'benign', and emit score as a JSON number in [0,1]. "
                 f"Thinking mode is explicitly fixed to {thinking_mode.value}."
             ),
         )
@@ -179,6 +234,7 @@ def _render_evidence_card(card: EvidenceCard) -> str:
         f"dataset_name: {card.dataset_name.value}",
         f"population_name: {card.population_name.value}",
         f"graph_regime: {card.graph_regime.value}",
+        f"evidence_card_projection: {card.evidence_card_projection}",
         f"node_id: {card.node_id}",
         "task_instruction:",
         f"  text: {card.task_instruction.text}",
@@ -209,11 +265,6 @@ def _render_evidence_card(card: EvidenceCard) -> str:
         f"  mean_relation_discrepancy: {_render_value('relation_profile.mean_relation_discrepancy', card.relation_profile.mean_relation_discrepancy, mask)}",
         "neighbor_summary:",
         f"  total_neighbors: {_render_value('neighbor_summary.total_neighbors', card.neighbor_summary.total_neighbors, mask)}",
-        f"  labeled_neighbors: {_render_value('neighbor_summary.labeled_neighbors', card.neighbor_summary.labeled_neighbors, mask)}",
-        f"  positive_neighbors: {_render_value('neighbor_summary.positive_neighbors', card.neighbor_summary.positive_neighbors, mask)}",
-        f"  negative_neighbors: {_render_value('neighbor_summary.negative_neighbors', card.neighbor_summary.negative_neighbors, mask)}",
-        f"  unlabeled_neighbors: {_render_value('neighbor_summary.unlabeled_neighbors', card.neighbor_summary.unlabeled_neighbors, mask)}",
-        f"ablation_mask: {', '.join(sorted(item.value for item in mask)) if mask else 'None'}",
     ]
     return "\n".join(lines)
 

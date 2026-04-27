@@ -7,11 +7,14 @@ from typing import Literal, cast
 import numpy as np
 import pytest
 import sklearn.metrics
+from pydantic import ValidationError
 
 import eval.eval_head_only as eval_head_only
 from eval.calibration import compute_calibration_summary, compute_threshold_metrics, select_validation_threshold
 from eval.head_scoring import CheckpointProvenance, HeadScoringInputs, HeadScoringSample, ScorerReport
+from eval.temperature_scaling import apply_temperature_to_probs, fit_temperature_on_validation, logits_from_probs
 from evidence.evidence_schema import DataManifestLike, build_evidence_card
+from evidence.leakage_policy import formal_leakage_provenance_fields
 from evidence.prompt_builder import ThinkingMode
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from priorf_teacher.schema import (
@@ -95,6 +98,17 @@ def _data_manifest() -> DataManifest:
     )
 
 
+def _score_head_audit_kwargs() -> dict[str, str]:
+    return {
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
+
+def _formal_report_provenance_kwargs() -> dict:
+    return formal_leakage_provenance_fields(**_score_head_audit_kwargs())
+
+
 def _checkpoint_bundle() -> eval_head_only.FormalHeadOnlyCheckpointBundle:
     base = dict(
         run_id="run-123",
@@ -145,7 +159,7 @@ def _inputs(population_name: PopulationName, node_ids: tuple[int, ...], labels: 
     manifest = _data_manifest()
     bundle = _checkpoint_bundle()
     samples = []
-    for node_id, label in zip(node_ids, labels):
+    for node_id, label in zip(node_ids, labels, strict=True):
         card = build_evidence_card(
             teacher_record=_teacher_record(population_name, node_id, label),
             data_manifest=cast(DataManifestLike, manifest),
@@ -174,6 +188,9 @@ def _scorer_report(
         dataset_name=DatasetName.AMAZON,
         population_name=population_name,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        run_id="run-123",
+        report_split=population_name,
+        eval_type="head_scoring",
         checkpoint_provenance=_checkpoint_bundle().cls_head.to_shared_checkpoint_provenance(),
         scorer_schema_version="head_scorer/v1",
         n_total=len(probs),
@@ -198,6 +215,7 @@ def _scorer_report(
         pooling_path="pool_last_valid_token",
         uses_inference_mode=True,
         distributed_gather="none",
+        **_formal_report_provenance_kwargs(),
     )
 
 
@@ -240,6 +258,8 @@ def test_formal_head_only_eval_uses_shared_scorer_and_frozen_validation_threshol
         thinking_mode=ThinkingMode.NON_THINKING,
         checkpoint_source="best_checkpoint",
         checkpoint_bundle=_checkpoint_bundle(),
+        run_id="run-123",
+        **_score_head_audit_kwargs(),
         threshold_selection_metric="f1",
         include_oracle_diagnostics=True,
         calibration_bins=4,
@@ -261,6 +281,137 @@ def test_formal_head_only_eval_uses_shared_scorer_and_frozen_validation_threshol
     assert report.diagnostics.oracle_same_population_metrics is not None
     assert report.diagnostics.oracle_same_population_metrics.f1 == pytest.approx(0.8)
     assert report.diagnostics.oracle_same_population_metrics.f1 > report.headline_metrics.f1_at_val_threshold
+    assert report.diagnostics.diagnostic_only is True
+    assert report.diagnostics.formal_excluded is True
+    assert report.threshold_source == "validation"
+    assert report.dataset_name == DatasetName.AMAZON
+    assert report.graph_regime == GraphRegime.TRANSDUCTIVE_STANDARD
+    assert report.run_id == "run-123"
+    assert report.validation_split == PopulationName.VALIDATION
+    assert report.report_split == PopulationName.FINAL_TEST
+    assert report.eval_type == "head_only"
+
+    old_payload = report.model_dump(mode="python")
+    for field_name in (
+        "leakage_policy_version",
+        "neighbor_label_policy",
+        "evidence_card_projection",
+        "student_visible_forbidden_fields",
+        "teacher_prob_masked",
+        "teacher_logit_masked",
+        "neighbor_label_counts_visible",
+        "formal_safe_result",
+        "prompt_audit_path",
+        "prompt_audit_hash",
+    ):
+        old_payload.pop(field_name, None)
+    with pytest.raises(ValidationError):
+        eval_head_only.FormalHeadOnlyReport.model_validate(old_payload)
+
+    missing_identity_payload = report.model_dump(mode="python")
+    missing_identity_payload.pop("dataset_name")
+    with pytest.raises(ValidationError):
+        eval_head_only.FormalHeadOnlyReport.model_validate(missing_identity_payload)
+
+    missing_hash_payload = report.model_dump(mode="python")
+    missing_hash_payload.pop("prompt_audit_hash")
+    with pytest.raises(ValidationError):
+        eval_head_only.FormalHeadOnlyReport.model_validate(missing_hash_payload)
+
+    contaminated_payload = report.model_dump(mode="python")
+    contaminated_payload["neighbor_label_counts_visible"] = True
+    with pytest.raises(ValidationError):
+        eval_head_only.FormalHeadOnlyReport.model_validate(contaminated_payload)
+
+    wrong_projection_payload = report.model_dump(mode="python")
+    wrong_projection_payload["evidence_card_projection"] = "internal_full"
+    with pytest.raises(ValidationError):
+        eval_head_only.FormalHeadOnlyReport.model_validate(wrong_projection_payload)
+
+
+def test_formal_head_only_eval_can_apply_temperature_scaling(monkeypatch: pytest.MonkeyPatch):
+    validation_inputs = _inputs(PopulationName.VALIDATION, (3, 4, 8, 9), (0, 0, 1, 1))
+    report_inputs = _inputs(PopulationName.FINAL_TEST, (21, 22, 23, 24), (0, 1, 1, 0))
+    validation_report = _scorer_report(
+        population_name=PopulationName.VALIDATION,
+        probs=(0.01, 0.15, 0.85, 0.99),
+        labels=(0, 1, 1, 0),
+        node_ids=(3, 4, 8, 9),
+    )
+    report_population = _scorer_report(
+        population_name=PopulationName.FINAL_TEST,
+        probs=(0.02, 0.20, 0.80, 0.98),
+        labels=(0, 1, 1, 0),
+        node_ids=(21, 22, 23, 24),
+    )
+
+    def fake_score_head(**kwargs):
+        if kwargs["inputs"] == validation_inputs:
+            return validation_report
+        if kwargs["inputs"] == report_inputs:
+            return report_population
+        raise AssertionError("unexpected HeadScoringInputs")
+
+    monkeypatch.setattr(eval_head_only, "score_head", fake_score_head)
+
+    expected_temperature = fit_temperature_on_validation(
+        logits=logits_from_probs(probs=validation_report.probs),
+        labels=validation_report.labels,
+    )
+    expected_validation_probs = apply_temperature_to_probs(
+        probs=validation_report.probs,
+        temperature=expected_temperature,
+    )
+    expected_report_probs = apply_temperature_to_probs(
+        probs=report_population.probs,
+        temperature=expected_temperature,
+    )
+    expected_threshold = select_validation_threshold(
+        probs=expected_validation_probs,
+        labels=validation_report.labels,
+        source_population_name=PopulationName.VALIDATION,
+        selection_metric="f1",
+    )
+    expected_calibration = compute_calibration_summary(
+        probs=expected_report_probs,
+        labels=report_population.labels,
+        population_name=PopulationName.FINAL_TEST,
+        num_bins=4,
+    )
+
+    report = eval_head_only.run_formal_head_only_eval(
+        validation_inputs=validation_inputs,
+        report_inputs=report_inputs,
+        validation_population_metadata=_population_metadata(PopulationName.VALIDATION),
+        report_population_metadata=_population_metadata(PopulationName.FINAL_TEST),
+        model=object(),
+        cls_head=object(),
+        tokenizer=object(),
+        thinking_mode=ThinkingMode.NON_THINKING,
+        checkpoint_source="best_checkpoint",
+        checkpoint_bundle=_checkpoint_bundle(),
+        run_id="run-123",
+        **_score_head_audit_kwargs(),
+        threshold_selection_metric="f1",
+        include_oracle_diagnostics=False,
+        calibration_bins=4,
+        apply_temperature_scaling=True,
+    )
+
+    assert report.temperature == pytest.approx(expected_temperature)
+    assert report.validation_threshold.selected_threshold == pytest.approx(
+        expected_threshold.selected_threshold
+    )
+    assert report.calibration.brier_score == pytest.approx(expected_calibration.brier_score)
+    assert report.calibration.expected_calibration_error == pytest.approx(
+        expected_calibration.expected_calibration_error
+    )
+    assert report.calibration.max_calibration_gap == pytest.approx(
+        expected_calibration.max_calibration_gap
+    )
+    assert report.headline_metrics.auroc == pytest.approx(report_population.auroc)
+    assert report.headline_metrics.auprc == pytest.approx(report_population.auprc)
+    assert report.headline_metrics.prediction_std == pytest.approx(np.std(expected_report_probs))
 
 
 def test_formal_head_only_eval_rejects_validation_as_report_population():
@@ -279,6 +430,8 @@ def test_formal_head_only_eval_rejects_validation_as_report_population():
             thinking_mode=ThinkingMode.NON_THINKING,
             checkpoint_source="best_checkpoint",
             checkpoint_bundle=_checkpoint_bundle(),
+            run_id="run-123",
+            **_score_head_audit_kwargs(),
             threshold_selection_metric="f1",
             include_oracle_diagnostics=False,
         )
@@ -297,7 +450,10 @@ def test_formal_head_only_eval_requires_cls_head_provenance_to_match_inputs(monk
         }
     )
 
-    monkeypatch.setattr(eval_head_only, "score_head", lambda **kwargs: pytest.fail("score_head should not run"))
+    def fail_if_score_head_runs(**_kwargs):
+        pytest.fail("score_head should not run")
+
+    monkeypatch.setattr(eval_head_only, "score_head", fail_if_score_head_runs)
 
     with pytest.raises(ValueError, match="must match the fail-closed cls_head checkpoint provenance"):
         eval_head_only.run_formal_head_only_eval(
@@ -311,6 +467,8 @@ def test_formal_head_only_eval_requires_cls_head_provenance_to_match_inputs(monk
             thinking_mode=ThinkingMode.NON_THINKING,
             checkpoint_source="best_checkpoint",
             checkpoint_bundle=_checkpoint_bundle(),
+            run_id="run-123",
+            **_score_head_audit_kwargs(),
             threshold_selection_metric="f1",
             include_oracle_diagnostics=False,
         )
@@ -351,6 +509,8 @@ def test_formal_head_only_eval_rejects_single_class_population(monkeypatch: pyte
             thinking_mode=ThinkingMode.NON_THINKING,
             checkpoint_source="best_checkpoint",
             checkpoint_bundle=_checkpoint_bundle(),
+            run_id="run-123",
+            **_score_head_audit_kwargs(),
             threshold_selection_metric="f1",
             include_oracle_diagnostics=False,
         )

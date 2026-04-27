@@ -18,6 +18,7 @@ from evidence.ablations import (
 )
 from evidence.evidence_schema import EvidenceAblationMask, build_evidence_card
 from evidence.prompt_builder import ThinkingMode
+from evidence.leakage_policy import formal_leakage_provenance_fields
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from priorf_teacher.schema import (
     DatasetName,
@@ -27,6 +28,18 @@ from priorf_teacher.schema import (
     RelationProfile,
     TeacherExportRecord,
 )
+
+
+
+def _score_head_audit_kwargs() -> dict[str, str]:
+    return {
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
+
+def _formal_report_provenance_kwargs() -> dict:
+    return formal_leakage_provenance_fields(**_score_head_audit_kwargs())
 
 CHECKPOINT = CheckpointProvenance(
     path="outputs/gated/ckpt-step-8.safetensors",
@@ -115,6 +128,9 @@ def _scorer_report(
         dataset_name=DatasetName.AMAZON,
         population_name=population,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        run_id="run-123",
+        report_split=population,
+        eval_type="head_scoring",
         checkpoint_provenance=checkpoint,
         scorer_schema_version="head_scorer/v1",
         n_total=n_total,
@@ -139,6 +155,7 @@ def _scorer_report(
         pooling_path="pool_last_valid_token",
         uses_inference_mode=True,
         distributed_gather=distributed_gather,
+        **_formal_report_provenance_kwargs(),
     )
 
 

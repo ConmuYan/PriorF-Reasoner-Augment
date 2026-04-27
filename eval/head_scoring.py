@@ -49,6 +49,19 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from evidence.evidence_schema import EvidenceCard
+from evidence.leakage_policy import (
+    EVIDENCE_CARD_PROJECTION,
+    FORMAL_SAFE_RESULT,
+    HEX64_PATTERN,
+    LEAKAGE_POLICY_VERSION,
+    NEIGHBOR_LABEL_COUNTS_VISIBLE,
+    NEIGHBOR_LABEL_POLICY,
+    STUDENT_VISIBLE_FORBIDDEN_FIELD_PATHS,
+    TEACHER_LOGIT_MASKED,
+    TEACHER_PROB_MASKED,
+    formal_leakage_provenance_fields,
+    validate_formal_leakage_payload,
+)
 from evidence.prompt_builder import PromptMode, ThinkingMode, build_prompt
 from llm.hidden_state_pooling import pool_last_valid_token
 from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
@@ -113,6 +126,7 @@ class HeadScoringInputs(BaseModel):
     population_name: PopulationName
     graph_regime: GraphRegime
     checkpoint_provenance: CheckpointProvenance
+    run_id: StrictStr = Field(default="head_scoring_ad_hoc", min_length=1)
     scorer_schema_version: Literal["head_scorer/v1"] = _SCORER_SCHEMA_VERSION
 
     @model_validator(mode="after")
@@ -153,6 +167,9 @@ class ScorerReport(BaseModel):
     population_name: PopulationName
     graph_regime: GraphRegime
     checkpoint_provenance: CheckpointProvenance
+    run_id: StrictStr = Field(min_length=1)
+    report_split: PopulationName
+    eval_type: Literal["head_scoring"]
     scorer_schema_version: Literal["head_scorer/v1"]
 
     # Counts
@@ -191,8 +208,27 @@ class ScorerReport(BaseModel):
     # Distributed audit
     distributed_gather: Literal["none", "accelerate_gather_for_metrics"]
 
+    # Leakage/projection provenance
+    leakage_policy_version: Literal["evidence_leakage_policy/v1"]
+    neighbor_label_policy: Literal["removed_from_student_visible"]
+    evidence_card_projection: Literal["student_safe_v1"]
+    student_visible_forbidden_fields: tuple[str, ...]
+    teacher_prob_masked: Literal[True]
+    teacher_logit_masked: Literal[True]
+    neighbor_label_counts_visible: Literal[False]
+    formal_safe_result: Literal[True]
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
+
+    @model_validator(mode="after")
+    def _formal_leakage_fields_consistent(self) -> "ScorerReport":
+        validate_formal_leakage_payload(self.model_dump(mode="python"), context="ScorerReport")
+        return self
+
     @model_validator(mode="after")
     def _counts_and_arrays_consistent(self) -> "ScorerReport":
+        if self.report_split != self.population_name:
+            raise ValueError("report_split must match population_name")
         if self.n_positive + self.n_negative != self.n_total:
             raise ValueError("n_positive + n_negative must equal n_total")
         if len(self.probs) != self.n_total:
@@ -214,6 +250,8 @@ def score_head(
     cls_head: ClsHead,
     tokenizer,
     thinking_mode: ThinkingMode,
+    prompt_audit_path: str,
+    prompt_audit_hash: str,
     accelerator: "object | None" = None,
 ) -> ScorerReport:
     """Run the canonical head ``predict_proba`` path and return a ``ScorerReport``.
@@ -361,6 +399,9 @@ def score_head(
         population_name=inputs.population_name,
         graph_regime=inputs.graph_regime,
         checkpoint_provenance=inputs.checkpoint_provenance,
+        run_id=inputs.run_id,
+        report_split=inputs.population_name,
+        eval_type="head_scoring",
         scorer_schema_version=inputs.scorer_schema_version,
         n_total=n_total,
         n_positive=n_positive,
@@ -384,4 +425,8 @@ def score_head(
         pooling_path="pool_last_valid_token",
         uses_inference_mode=True,
         distributed_gather=distributed_gather,
+        **formal_leakage_provenance_fields(
+            prompt_audit_path=prompt_audit_path,
+            prompt_audit_hash=prompt_audit_hash,
+        ),
     )

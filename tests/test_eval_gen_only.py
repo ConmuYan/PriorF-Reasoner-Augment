@@ -3,10 +3,11 @@ from __future__ import annotations
 import math
 
 import pytest
+from pydantic import ValidationError
 from sklearn import metrics
 
 from eval.eval_gen_only import GenOnlyEvalInputs, GenOnlyEvalSample, evaluate_gen_only
-from evidence.evidence_schema import DataManifestLike, build_evidence_card
+from evidence.evidence_schema import build_evidence_card
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
 
@@ -75,6 +76,15 @@ def _manifest() -> DataManifest:
     )
 
 
+
+
+def _eval_audit_kwargs() -> dict[str, str]:
+    return {
+        "run_id": "run-123",
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
 def _sample(*, node_id: int, ground_truth_label: int, generated_text: str) -> GenOnlyEvalSample:
     card = build_evidence_card(
         teacher_record=_record(node_id=node_id, ground_truth_label=ground_truth_label),
@@ -114,6 +124,7 @@ def test_eval_gen_only_uses_strict_parse_as_headline_and_keeps_failures_in_denom
         dataset_name=DatasetName.AMAZON,
         population_name=PopulationName.VALIDATION,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_eval_audit_kwargs(),
     )
 
     report = evaluate_gen_only(inputs=inputs)
@@ -124,6 +135,9 @@ def test_eval_gen_only_uses_strict_parse_as_headline_and_keeps_failures_in_denom
     assert report.normalized_parse_rate == pytest.approx(2 / 3)
     assert report.teacher_conditioned is True
     assert report.prompt_mode == "eval_gen"
+    assert report.run_id == "run-123"
+    assert report.report_split == PopulationName.VALIDATION
+    assert report.eval_type == "gen_only"
     assert report.strict_parse_failure_policy == "penalty_mode"
     assert report.strict_parse_penalty_strategy == "ground_truth_opposite_extreme_probability"
     assert report.strict_parse_failure_count == 2
@@ -138,6 +152,44 @@ def test_eval_gen_only_uses_strict_parse_as_headline_and_keeps_failures_in_denom
     assert report.brier_score == pytest.approx((0.04 + 1.0 + 1.0) / 3)
     assert report.auroc == pytest.approx(metrics.roc_auc_score([1, 0, 1], [0.8, 1.0, 0.0]))
     assert report.auprc == pytest.approx(metrics.average_precision_score([1, 0, 1], [0.8, 1.0, 0.0]))
+
+    missing_identity_payload = report.model_dump(mode="python")
+    missing_identity_payload.pop("run_id")
+    with pytest.raises(ValidationError):
+        type(report).model_validate(missing_identity_payload)
+
+
+def test_eval_gen_only_treats_score_as_fraud_probability_even_for_benign_label():
+    inputs = GenOnlyEvalInputs(
+        samples=(
+            _sample(
+                node_id=6,
+                ground_truth_label=0,
+                generated_text=(
+                    '{"rationale":"strict ok","evidence":["teacher evidence"],'
+                    '"pattern_hint":"pattern","label":"benign","score":0.05}'
+                ),
+            ),
+            _sample(
+                node_id=7,
+                ground_truth_label=1,
+                generated_text=(
+                    '{"rationale":"strict ok","evidence":["teacher evidence"],'
+                    '"pattern_hint":"pattern","label":"fraud","score":0.95}'
+                ),
+            ),
+        ),
+        dataset_name=DatasetName.AMAZON,
+        population_name=PopulationName.VALIDATION,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_eval_audit_kwargs(),
+    )
+
+    report = evaluate_gen_only(inputs=inputs)
+
+    assert report.probs == pytest.approx((0.05, 0.95))
+    assert report.auroc == pytest.approx(1.0)
+    assert report.auprc == pytest.approx(1.0)
 
 
 def test_eval_gen_only_single_class_population_leaves_auroc_and_auprc_none():
@@ -156,6 +208,7 @@ def test_eval_gen_only_single_class_population_leaves_auroc_and_auprc_none():
         dataset_name=DatasetName.AMAZON,
         population_name=PopulationName.VALIDATION,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_eval_audit_kwargs(),
     )
 
     report = evaluate_gen_only(inputs=inputs)
@@ -164,3 +217,43 @@ def test_eval_gen_only_single_class_population_leaves_auroc_and_auprc_none():
     assert report.auroc is None
     assert report.auprc is None
     assert math.isfinite(report.brier_score)
+
+
+def test_old_prefixed_gen_only_report_without_leakage_fields_fails_validation():
+    inputs = GenOnlyEvalInputs(
+        samples=(
+            _sample(
+                node_id=8,
+                ground_truth_label=1,
+                generated_text=(
+                    '{"rationale":"strict ok","evidence":["teacher evidence"],'
+                    '"pattern_hint":"pattern","label":"fraud","score":0.9}'
+                ),
+            ),
+        ),
+        dataset_name=DatasetName.AMAZON,
+        population_name=PopulationName.VALIDATION,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_eval_audit_kwargs(),
+    )
+    payload = evaluate_gen_only(inputs=inputs).model_dump(mode="python")
+    for field_name in (
+        "leakage_policy_version",
+        "neighbor_label_policy",
+        "evidence_card_projection",
+        "student_visible_forbidden_fields",
+        "teacher_prob_masked",
+        "teacher_logit_masked",
+        "neighbor_label_counts_visible",
+        "formal_safe_result",
+        "prompt_audit_path",
+        "prompt_audit_hash",
+    ):
+        payload.pop(field_name, None)
+    with pytest.raises(ValidationError):
+        type(evaluate_gen_only(inputs=inputs)).model_validate(payload)
+
+    payload = evaluate_gen_only(inputs=inputs).model_dump(mode="python")
+    payload["teacher_prob_masked"] = False
+    with pytest.raises(ValidationError):
+        type(evaluate_gen_only(inputs=inputs)).model_validate(payload)

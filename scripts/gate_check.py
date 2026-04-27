@@ -25,12 +25,19 @@ _REQUIRED_TRUE_FIELDS = (
     "smoke_pipeline_pass",
     "teacher_prob_ablation_pass",
     "population_contract_pass",
+    "leakage_audit_pass",
 )
 
 
 def gate_check(*, manifest_path: str | Path) -> GateManifest:
     manifest = load_gate_manifest(manifest_path)
     failed = [field_name for field_name in _REQUIRED_TRUE_FIELDS if getattr(manifest, field_name) is not True]
+    if manifest.provenance.generator_git_dirty:
+        failed.append("provenance.generator_git_dirty")
+    for artifact_field in ("head_only_report", "fusion_report", "gen_only_report", "faithfulness_report"):
+        artifact = getattr(manifest.provenance, artifact_field)
+        if artifact.exists is not True or artifact.sha256 is None:
+            failed.append(f"provenance.{artifact_field}")
     if failed:
         raise ValueError("gate manifest failed required gates: " + ", ".join(failed))
     return manifest

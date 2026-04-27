@@ -21,6 +21,7 @@ import torch
 from pydantic import ValidationError
 
 from evidence.evidence_schema import build_evidence_card
+from evidence.leakage_policy import formal_leakage_provenance_fields
 from evidence.prompt_builder import PromptMode, ThinkingMode
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from priorf_teacher.schema import (
@@ -164,6 +165,17 @@ def _checkpoint_provenance() -> CheckpointProvenance:
         step=42,
         content_hash="deadbeef" * 8,
     )
+
+
+def _score_head_audit_kwargs() -> dict[str, str]:
+    return {
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
+
+def _formal_report_provenance_kwargs() -> dict:
+    return formal_leakage_provenance_fields(**_score_head_audit_kwargs())
 
 
 def _inputs(
@@ -321,6 +333,9 @@ def _valid_report_kwargs() -> dict:
         dataset_name=DatasetName.AMAZON,
         population_name=PopulationName.VALIDATION,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        run_id="run-123",
+        report_split=PopulationName.VALIDATION,
+        eval_type="head_scoring",
         checkpoint_provenance=_checkpoint_provenance(),
         scorer_schema_version="head_scorer/v1",
         n_total=3,
@@ -345,6 +360,7 @@ def _valid_report_kwargs() -> dict:
         pooling_path="pool_last_valid_token",
         uses_inference_mode=True,
         distributed_gather="none",
+        **_formal_report_provenance_kwargs(),
     )
 
 
@@ -361,6 +377,9 @@ def test_scorer_report_schema_field_presence_and_extra_forbidden():
         "dataset_name",
         "population_name",
         "graph_regime",
+        "run_id",
+        "report_split",
+        "eval_type",
         "checkpoint_provenance",
         "scorer_schema_version",
         "n_total",
@@ -385,6 +404,16 @@ def test_scorer_report_schema_field_presence_and_extra_forbidden():
         "pooling_path",
         "uses_inference_mode",
         "distributed_gather",
+        "leakage_policy_version",
+        "neighbor_label_policy",
+        "evidence_card_projection",
+        "student_visible_forbidden_fields",
+        "teacher_prob_masked",
+        "teacher_logit_masked",
+        "neighbor_label_counts_visible",
+        "formal_safe_result",
+        "prompt_audit_path",
+        "prompt_audit_hash",
     }
     assert set(ScorerReport.model_fields.keys()) == expected_fields
 
@@ -441,6 +470,7 @@ def test_prompt_builder_called_with_eval_head_and_thinking_mode(monkeypatch):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert len(calls) == len(inputs.samples)
@@ -467,6 +497,7 @@ def test_pool_last_valid_token_is_the_only_pooling(monkeypatch):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert len(calls) == len(inputs.samples) >= 1
@@ -489,6 +520,7 @@ def test_model_generate_is_never_called():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
 
@@ -503,6 +535,7 @@ def test_eval_called_and_clshead_isinstance_behaviour():
         cls_head=cls_head,
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert model.eval_count >= 1
@@ -534,6 +567,7 @@ def test_inference_mode_is_in_force_and_no_autograd(monkeypatch):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert captured["requires_grad"], "sigmoid must have been called at least once"
@@ -555,6 +589,7 @@ def test_single_class_population_marks_auroc_auprc_none(label):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     assert report.is_single_class_population is True
     assert report.auroc is None
@@ -595,6 +630,7 @@ def test_empty_population_is_blocked():
             cls_head=DummyClsHead(),
             tokenizer=DummyTokenizer(),
             thinking_mode=ThinkingMode.NON_THINKING,
+            **_score_head_audit_kwargs(),
             accelerator=accelerator,
         )
 
@@ -616,6 +652,7 @@ def test_permutation_equivariance():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     report_b = score_head(
         inputs=inputs_b,
@@ -623,6 +660,7 @@ def test_permutation_equivariance():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     triples_a = list(zip(report_a.node_ids, report_a.probs, report_a.labels))
@@ -650,6 +688,7 @@ def test_determinism_between_two_identical_runs():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     report_2 = score_head(
         inputs=inputs,
@@ -657,6 +696,7 @@ def test_determinism_between_two_identical_runs():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     assert report_1.probs == report_2.probs
     assert report_1.labels == report_2.labels
@@ -682,6 +722,7 @@ def test_non_finite_logit_raises(bad):
             cls_head=cls_head,
             tokenizer=DummyTokenizer(),
             thinking_mode=ThinkingMode.NON_THINKING,
+            **_score_head_audit_kwargs(),
         )
 
 
@@ -694,6 +735,7 @@ def test_accelerator_none_reports_none_and_avoids_torch_distributed():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     assert report.distributed_gather == "none"
 
@@ -739,6 +781,7 @@ def test_accelerator_branch_and_world_level_consistency():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
         accelerator=acc_r0,
     )
     report_r1 = score_head(
@@ -747,6 +790,7 @@ def test_accelerator_branch_and_world_level_consistency():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
         accelerator=acc_r1,
     )
 
@@ -777,6 +821,7 @@ def test_provenance_echoed_into_report():
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
     assert report.dataset_name == inputs.dataset_name
     assert report.population_name == inputs.population_name
@@ -843,6 +888,7 @@ def test_scorer_never_writes_files(monkeypatch, tmp_path):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert not writes, f"scorer unexpectedly issued file writes: {writes}"
@@ -860,6 +906,7 @@ def test_scorer_is_independent_of_env_vars(monkeypatch):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     monkeypatch.delenv("PRIORF_SCORER_X", raising=False)
@@ -870,6 +917,7 @@ def test_scorer_is_independent_of_env_vars(monkeypatch):
         cls_head=DummyClsHead(),
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert report_with_env.model_dump(mode="python") == report_without_env.model_dump(mode="python")
@@ -906,6 +954,7 @@ def test_logit_is_hard_cast_to_float32_before_sigmoid(monkeypatch, logit_dtype):
         cls_head=cls_head,
         tokenizer=DummyTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert captured_dtypes, "sigmoid must have been invoked"
@@ -926,6 +975,7 @@ def test_forward_is_batch_one_with_all_ones_mask_and_no_padding_kwarg():
         cls_head=DummyClsHead(),
         tokenizer=tokenizer,
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert model.forward_calls, "model.forward must be invoked"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from eval.calibration import (
@@ -26,9 +27,23 @@ from eval.calibration import (
     select_validation_threshold,
 )
 from eval.head_scoring import CheckpointProvenance, HeadScoringInputs, ScorerReport, score_head
+from eval.temperature_scaling import apply_temperature_to_probs, fit_temperature_on_validation, logits_from_probs
+from evidence.leakage_policy import (
+    EVIDENCE_CARD_PROJECTION,
+    FORMAL_SAFE_RESULT,
+    HEX64_PATTERN,
+    LEAKAGE_POLICY_VERSION,
+    NEIGHBOR_LABEL_COUNTS_VISIBLE,
+    NEIGHBOR_LABEL_POLICY,
+    STUDENT_VISIBLE_FORBIDDEN_FIELD_PATHS,
+    TEACHER_LOGIT_MASKED,
+    TEACHER_PROB_MASKED,
+    formal_leakage_provenance_fields,
+    validate_formal_leakage_payload,
+)
 from evidence.prompt_builder import ThinkingMode
 from graph_data.manifests import PopulationMetadata
-from priorf_teacher.schema import GraphRegime, PopulationName
+from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
 
 __all__ = (
     "FormalHeadOnlyCheckpointBundle",
@@ -75,7 +90,7 @@ class FormalHeadOnlyCheckpointBundle(BaseModel):
     cls_head: FormalHeadOnlyCheckpointComponent
 
     @model_validator(mode="after")
-    def _components_must_share_identity(self) -> "FormalHeadOnlyCheckpointBundle":
+    def _components_must_share_identity(self) -> FormalHeadOnlyCheckpointBundle:
         reference = self.llm_backbone
         for field_name in ("peft_adapter", "cls_head"):
             component = getattr(self, field_name)
@@ -113,11 +128,13 @@ class FormalHeadOnlyDiagnostics(BaseModel):
 
     model_config = _STRICT_MODEL_CONFIG
 
+    diagnostic_only: Literal[True] = True
+    formal_excluded: Literal[True] = True
     oracle_same_population_threshold: FrozenThresholdReport | None = None
     oracle_same_population_metrics: ThresholdMetrics | None = None
 
     @model_validator(mode="after")
-    def _oracle_fields_move_together(self) -> "FormalHeadOnlyDiagnostics":
+    def _oracle_fields_move_together(self) -> FormalHeadOnlyDiagnostics:
         if (self.oracle_same_population_threshold is None) != (
             self.oracle_same_population_metrics is None
         ):
@@ -133,20 +150,46 @@ class FormalHeadOnlyReport(BaseModel):
     model_config = _STRICT_MODEL_CONFIG
 
     schema_version: Literal["formal_head_only_eval/v1"] = _FORMAL_HEAD_ONLY_SCHEMA_VERSION
-    checkpoint_source: Literal["best_checkpoint", "final_checkpoint"]
+    dataset_name: DatasetName
     graph_regime: GraphRegime
+    run_id: StrictStr = Field(min_length=1)
+    validation_split: Literal[PopulationName.VALIDATION]
+    report_split: PopulationName
+    eval_type: Literal["head_only"]
+    checkpoint_source: Literal["best_checkpoint", "final_checkpoint"]
     thinking_mode: ThinkingMode
     population_metadata: PopulationMetadata
     validation_population_metadata: PopulationMetadata
     checkpoint_bundle: FormalHeadOnlyCheckpointBundle
     scorer_checkpoint_provenance: CheckpointProvenance
     validation_threshold: FrozenThresholdReport
+    temperature: float | None = Field(default=None, ge=0.1, le=10.0)
     calibration: CalibrationSummary
     headline_metrics: FormalHeadOnlyHeadlineMetrics
     diagnostics: FormalHeadOnlyDiagnostics | None = None
+    threshold_source: Literal["validation"]
+    leakage_policy_version: Literal["evidence_leakage_policy/v1"]
+    neighbor_label_policy: Literal["removed_from_student_visible"]
+    evidence_card_projection: Literal["student_safe_v1"]
+    student_visible_forbidden_fields: tuple[str, ...]
+    teacher_prob_masked: Literal[True]
+    teacher_logit_masked: Literal[True]
+    neighbor_label_counts_visible: Literal[False]
+    formal_safe_result: Literal[True]
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
 
     @model_validator(mode="after")
-    def _report_consistent(self) -> "FormalHeadOnlyReport":
+    def _formal_leakage_fields_consistent(self) -> FormalHeadOnlyReport:
+        validate_formal_leakage_payload(self.model_dump(mode="python"), context="FormalHeadOnlyReport")
+        return self
+
+    @model_validator(mode="after")
+    def _report_consistent(self) -> FormalHeadOnlyReport:
+        if self.report_split != PopulationName(self.population_metadata.population_name):
+            raise ValueError("report_split must match population_metadata.population_name")
+        if self.validation_split != PopulationName.VALIDATION:
+            raise ValueError("validation_split must be validation")
         if self.population_metadata.population_name == PopulationName.VALIDATION.value:
             raise ValueError("formal report population must be test-like, not validation")
         if self.population_metadata.contains_tuning_rows:
@@ -178,9 +221,13 @@ def run_formal_head_only_eval(
     thinking_mode: ThinkingMode,
     checkpoint_source: Literal["best_checkpoint", "final_checkpoint"],
     checkpoint_bundle: FormalHeadOnlyCheckpointBundle,
+    run_id: str,
+    prompt_audit_path: str,
+    prompt_audit_hash: str,
     threshold_selection_metric: Literal["f1"],
     include_oracle_diagnostics: bool,
     calibration_bins: int = 10,
+    apply_temperature_scaling: bool = False,
     accelerator: object | None = None,
 ) -> FormalHeadOnlyReport:
     """Run formal head-only evaluation through the shared scorer contract."""
@@ -201,6 +248,8 @@ def run_formal_head_only_eval(
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=thinking_mode,
+        prompt_audit_path=prompt_audit_path,
+        prompt_audit_hash=prompt_audit_hash,
         accelerator=accelerator,
     )
     report_population = score_head(
@@ -209,6 +258,8 @@ def run_formal_head_only_eval(
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=thinking_mode,
+        prompt_audit_path=prompt_audit_path,
+        prompt_audit_hash=prompt_audit_hash,
         accelerator=accelerator,
     )
 
@@ -221,19 +272,36 @@ def run_formal_head_only_eval(
         population_role="formal head-only reporting",
     )
 
+    validation_probs = tuple(float(value) for value in validation_report.probs)
+    report_probs = tuple(float(value) for value in report_population.probs)
+    temperature: float | None = None
+    if apply_temperature_scaling:
+        temperature = fit_temperature_on_validation(
+            logits=logits_from_probs(probs=validation_report.probs),
+            labels=validation_report.labels,
+        )
+        validation_probs = apply_temperature_to_probs(
+            probs=validation_report.probs,
+            temperature=temperature,
+        )
+        report_probs = apply_temperature_to_probs(
+            probs=report_population.probs,
+            temperature=temperature,
+        )
+
     validation_threshold = select_validation_threshold(
-        probs=validation_report.probs,
+        probs=validation_probs,
         labels=validation_report.labels,
         source_population_name=PopulationName(validation_report.population_name),
         selection_metric=threshold_selection_metric,
     )
     frozen_threshold_metrics = compute_threshold_metrics(
-        probs=report_population.probs,
+        probs=report_probs,
         labels=report_population.labels,
         threshold=validation_threshold.selected_threshold,
     )
     calibration = compute_calibration_summary(
-        probs=report_population.probs,
+        probs=report_probs,
         labels=report_population.labels,
         population_name=PopulationName(report_population.population_name),
         num_bins=calibration_bins,
@@ -242,7 +310,7 @@ def run_formal_head_only_eval(
     diagnostics: FormalHeadOnlyDiagnostics | None = None
     if include_oracle_diagnostics:
         oracle_threshold = select_validation_threshold(
-            probs=report_population.probs,
+            probs=report_probs,
             labels=report_population.labels,
             source_population_name=PopulationName.VALIDATION,
             selection_metric=threshold_selection_metric,
@@ -260,14 +328,21 @@ def run_formal_head_only_eval(
     assert report_population.auroc is not None
     assert report_population.auprc is not None
     return FormalHeadOnlyReport(
-        checkpoint_source=checkpoint_source,
+        dataset_name=report_inputs.dataset_name,
         graph_regime=report_inputs.graph_regime,
+        run_id=run_id,
+        validation_split=PopulationName.VALIDATION,
+        report_split=report_inputs.population_name,
+        eval_type="head_only",
+        checkpoint_source=checkpoint_source,
         thinking_mode=thinking_mode,
         population_metadata=report_population_metadata,
         validation_population_metadata=validation_population_metadata,
         checkpoint_bundle=checkpoint_bundle,
         scorer_checkpoint_provenance=report_population.checkpoint_provenance,
         validation_threshold=validation_threshold,
+        temperature=temperature,
+        threshold_source="validation",
         calibration=calibration,
         headline_metrics=FormalHeadOnlyHeadlineMetrics(
             auroc=float(report_population.auroc),
@@ -276,9 +351,13 @@ def run_formal_head_only_eval(
             precision_at_val_threshold=float(frozen_threshold_metrics.precision),
             recall_at_val_threshold=float(frozen_threshold_metrics.recall),
             specificity_at_val_threshold=float(frozen_threshold_metrics.specificity),
-            prediction_std=float(report_population.prob_std),
+            prediction_std=float(np.std(np.asarray(report_probs, dtype=np.float64))),
         ),
         diagnostics=diagnostics,
+        **formal_leakage_provenance_fields(
+            prompt_audit_path=prompt_audit_path,
+            prompt_audit_hash=prompt_audit_hash,
+        ),
     )
 
 

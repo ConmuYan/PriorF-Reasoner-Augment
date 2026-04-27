@@ -57,13 +57,16 @@ manifest clears.
    for every artifact. Without this manifest the gate cannot pass.
 
 3. **Stage 1 — structured-generation SFT** (gated namespace):
-
-   ```bash
-   scripts/run_stage1.sh -- python -m train.stage1_sft ...
-   ```
-
-   Uses TRL `SFTTrainer` on Evidence-Card → strict-JSON prompt /
-   completion pairs. Emits a Stage 1 checkpoint; still gated.
+ 
+    ```bash
+    scripts/run_stage1.sh -- python -m train.stage1_sft ...
+    ```
+ 
+    Uses the implemented `train.stage1_sft` entrypoint on Evidence-Card →
+    strict-JSON prompt / completion pairs. Emits a gated Stage 1 LoRA adapter
+    plus config + run_record provenance. In the current acceptance boundary,
+    Stage 2 still starts from the base Qwen checkpoint and does not yet consume
+    the Stage 1 adapter as a warm-start input.
 
 4. **Stage 2 — canonical joint trainer** (gated namespace):
 

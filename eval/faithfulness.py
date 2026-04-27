@@ -15,7 +15,20 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
 from eval.head_scoring import CheckpointProvenance, HeadScoringInputs, ScorerReport, score_head
-from evidence.evidence_schema import EvidenceAblationMask, EvidenceCard
+from evidence.evidence_schema import EvidenceAblationMask, EvidenceCard, STUDENT_PROMPT_ABLATION_MASK
+from evidence.leakage_policy import (
+    EVIDENCE_CARD_PROJECTION,
+    FORMAL_SAFE_RESULT,
+    HEX64_PATTERN,
+    LEAKAGE_POLICY_VERSION,
+    NEIGHBOR_LABEL_COUNTS_VISIBLE,
+    NEIGHBOR_LABEL_POLICY,
+    STUDENT_VISIBLE_FORBIDDEN_FIELD_PATHS,
+    TEACHER_LOGIT_MASKED,
+    TEACHER_PROB_MASKED,
+    formal_leakage_provenance_fields,
+    validate_formal_leakage_payload,
+)
 from evidence.prompt_builder import ThinkingMode
 from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
 
@@ -49,12 +62,15 @@ class FaithfulnessInputs(BaseModel):
     model_config = _STRICT_MODEL_CONFIG
 
     full_inputs: HeadScoringInputs
+    run_id: StrictStr = Field(min_length=1)
     thinking_mode: ThinkingMode
     frozen_decision_policy: FrozenDecisionPolicy
     selected_evidence_fields: tuple[EvidenceAblationMask, ...] = Field(min_length=1)
     teacher_prob_ablation_fields: tuple[EvidenceAblationMask, ...] = Field(min_length=1)
     minimum_formal_sample_size: StrictInt = Field(ge=1)
     faithfulness_schema_version: Literal["faithfulness/v1"] = _FAITHFULNESS_SCHEMA_VERSION
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
 
     @model_validator(mode="after")
     def _validate_formal_contract(self) -> "FaithfulnessInputs":
@@ -63,8 +79,17 @@ class FaithfulnessInputs(BaseModel):
                 "formal faithfulness requires at least minimum_formal_sample_size samples; "
                 "use a smoke/diagnostic lane instead"
             )
-        if any(sample.evidence_card.ablation_mask for sample in self.full_inputs.samples):
-            raise ValueError("formal faithfulness full_inputs must start from unablated Evidence Cards")
+        for sample in self.full_inputs.samples:
+            card = sample.evidence_card
+            if card.evidence_card_projection != EVIDENCE_CARD_PROJECTION:
+                raise ValueError("formal faithfulness inputs must use student-safe Evidence Cards by default")
+            if not STUDENT_PROMPT_ABLATION_MASK.issubset(card.ablation_mask):
+                raise ValueError("formal faithfulness student-safe inputs must mask direct teacher score fields")
+            neighbor_payload = card.neighbor_summary.model_dump(mode="json")
+            forbidden = {"labeled_neighbors", "positive_neighbors", "negative_neighbors", "unlabeled_neighbors"}
+            leaked = sorted(forbidden.intersection(neighbor_payload))
+            if leaked:
+                raise ValueError("formal faithfulness inputs expose forbidden neighbor fields: " + ", ".join(leaked))
 
         selected = frozenset(self.selected_evidence_fields)
         if len(selected) != len(self.selected_evidence_fields):
@@ -108,6 +133,9 @@ class FaithfulnessReport(BaseModel):
     dataset_name: DatasetName
     population_name: PopulationName
     graph_regime: GraphRegime
+    run_id: StrictStr = Field(min_length=1)
+    report_split: PopulationName
+    eval_type: Literal["faithfulness"]
     checkpoint_provenance: CheckpointProvenance
     scorer_schema_version: Literal["head_scorer/v1"]
     faithfulness_schema_version: Literal["faithfulness/v1"]
@@ -136,6 +164,21 @@ class FaithfulnessReport(BaseModel):
     pooling_path: Literal["pool_last_valid_token"]
     uses_inference_mode: bool
     distributed_gather: Literal["none", "accelerate_gather_for_metrics"]
+    leakage_policy_version: Literal["evidence_leakage_policy/v1"]
+    neighbor_label_policy: Literal["removed_from_student_visible"]
+    evidence_card_projection: Literal["student_safe_v1"]
+    student_visible_forbidden_fields: tuple[str, ...]
+    teacher_prob_masked: Literal[True]
+    teacher_logit_masked: Literal[True]
+    neighbor_label_counts_visible: Literal[False]
+    formal_safe_result: Literal[True]
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
+
+    @model_validator(mode="after")
+    def _formal_leakage_fields_consistent(self) -> "FaithfulnessReport":
+        validate_formal_leakage_payload(self.model_dump(mode="python"), context="FaithfulnessReport")
+        return self
 
     @model_validator(mode="after")
     def _nested_reports_must_match(self) -> "FaithfulnessReport":
@@ -147,6 +190,8 @@ class FaithfulnessReport(BaseModel):
         )
         if len(self.sample_results) != self.n_total:
             raise ValueError("len(sample_results) must equal n_total")
+        if self.report_split != self.population_name:
+            raise ValueError("report_split must match population_name")
         for report in nested:
             if report.dataset_name != self.dataset_name:
                 raise ValueError("nested report dataset_name mismatch")
@@ -191,6 +236,8 @@ def evaluate_faithfulness(
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=validated_inputs.thinking_mode,
+        prompt_audit_path=validated_inputs.prompt_audit_path,
+        prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
     )
     sufficiency_report = score_head(
@@ -202,6 +249,8 @@ def evaluate_faithfulness(
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=validated_inputs.thinking_mode,
+        prompt_audit_path=validated_inputs.prompt_audit_path,
+        prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
     )
     comprehensiveness_report = score_head(
@@ -210,6 +259,8 @@ def evaluate_faithfulness(
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=validated_inputs.thinking_mode,
+        prompt_audit_path=validated_inputs.prompt_audit_path,
+        prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
     )
     teacher_prob_ablation_report = score_head(
@@ -218,6 +269,8 @@ def evaluate_faithfulness(
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=validated_inputs.thinking_mode,
+        prompt_audit_path=validated_inputs.prompt_audit_path,
+        prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
     )
 
@@ -287,6 +340,9 @@ def evaluate_faithfulness(
         dataset_name=validated_inputs.full_inputs.dataset_name,
         population_name=validated_inputs.full_inputs.population_name,
         graph_regime=validated_inputs.full_inputs.graph_regime,
+        run_id=validated_inputs.run_id,
+        report_split=validated_inputs.full_inputs.population_name,
+        eval_type="faithfulness",
         checkpoint_provenance=validated_inputs.full_inputs.checkpoint_provenance,
         scorer_schema_version=validated_inputs.full_inputs.scorer_schema_version,
         faithfulness_schema_version=validated_inputs.faithfulness_schema_version,
@@ -311,6 +367,10 @@ def evaluate_faithfulness(
         pooling_path=full_report.pooling_path,
         uses_inference_mode=full_report.uses_inference_mode,
         distributed_gather=full_report.distributed_gather,
+        **formal_leakage_provenance_fields(
+            prompt_audit_path=validated_inputs.prompt_audit_path,
+            prompt_audit_hash=validated_inputs.prompt_audit_hash,
+        ),
     )
 
 
@@ -325,7 +385,7 @@ def _with_ablation(inputs: HeadScoringInputs, mask: frozenset[EvidenceAblationMa
 
 def _apply_ablation_mask(card: EvidenceCard, mask: frozenset[EvidenceAblationMask]) -> EvidenceCard:
     payload = card.model_dump(mode="python")
-    payload["ablation_mask"] = mask
+    payload["ablation_mask"] = frozenset(card.ablation_mask) | mask
     for item in mask:
         section, field_name = item.value.split(".", 1)
         if section in {"teacher_summary", "discrepancy_summary"}:

@@ -14,6 +14,7 @@ from typing import Final, Iterable, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator, model_validator
 
+from evidence.leakage_policy import EVIDENCE_CARD_PROJECTION, INTERNAL_EVIDENCE_CARD_PROJECTION
 from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
 
 CANONICAL_SCHEMA_HINT_ORDER: Final[tuple[str, str, str, str, str]] = (
@@ -112,6 +113,14 @@ class DiscrepancySummary(BaseModel):
         return value
 
 
+class StudentVisibleNeighborSummary(BaseModel):
+    """Student-safe neighborhood summary with no label-derived neighbor counts."""
+
+    model_config = _STRICT_MODEL_CONFIG
+
+    total_neighbors: StrictInt = Field(ge=0)
+
+
 class EvidenceAblationMask(str, Enum):
     """Explicit field-level ablation targets; no free-form mask strings."""
 
@@ -142,6 +151,14 @@ class EvidenceAblationMask(str, Enum):
     NEIGHBOR_SUMMARY_UNLABELED_NEIGHBORS = "neighbor_summary.unlabeled_neighbors"
 
 
+STUDENT_PROMPT_ABLATION_MASK: Final[frozenset[EvidenceAblationMask]] = frozenset(
+    {
+        EvidenceAblationMask.TEACHER_SUMMARY_TEACHER_PROB,
+        EvidenceAblationMask.TEACHER_SUMMARY_TEACHER_LOGIT,
+    }
+)
+
+
 class EvidenceCard(BaseModel):
     """One schema-validated, non-leaking structural evidence card."""
 
@@ -154,10 +171,11 @@ class EvidenceCard(BaseModel):
     teacher_summary: TeacherSummary
     discrepancy_summary: DiscrepancySummary
     relation_profile: RelationProfile
-    neighbor_summary: NeighborSummary
+    neighbor_summary: NeighborSummary | StudentVisibleNeighborSummary
     task_instruction: TaskInstruction
     ablation_mask: frozenset[EvidenceAblationMask] = Field(default_factory=frozenset)
     schema_version: Literal["evidence_card/v1"] = SCHEMA_VERSION
+    evidence_card_projection: Literal["internal_full_v1", "student_safe_v1"] = INTERNAL_EVIDENCE_CARD_PROJECTION
 
     @model_validator(mode="after")
     def _masked_nullable_fields_must_match(self) -> "EvidenceCard":
@@ -249,6 +267,28 @@ def build_evidence_card(
             schema_hint_order=CANONICAL_SCHEMA_HINT_ORDER,
         ),
         ablation_mask=validated_mask,
+        evidence_card_projection=INTERNAL_EVIDENCE_CARD_PROJECTION,
+    )
+
+
+def build_student_evidence_card(
+    teacher_record: TeacherExportRecord,
+    data_manifest: DataManifestLike,
+) -> EvidenceCard:
+    """Build the student-visible Evidence Card without direct teacher-score shortcuts."""
+
+    card = build_evidence_card(
+        teacher_record=teacher_record,
+        data_manifest=data_manifest,
+        ablation_mask=STUDENT_PROMPT_ABLATION_MASK,
+    )
+    return card.model_copy(
+        update={
+            "neighbor_summary": StudentVisibleNeighborSummary(
+                total_neighbors=card.neighbor_summary.total_neighbors,
+            ),
+            "evidence_card_projection": EVIDENCE_CARD_PROJECTION,
+        }
     )
 
 

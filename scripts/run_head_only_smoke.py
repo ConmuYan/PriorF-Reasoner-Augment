@@ -55,7 +55,7 @@ from evidence.evidence_schema import (  # noqa: E402
     TaskInstruction,
     TeacherSummary,
 )
-from evidence.prompt_builder import ThinkingMode  # noqa: E402
+from evidence.prompt_builder import PromptMode, ThinkingMode, build_prompt  # noqa: E402
 from priorf_teacher.schema import (  # noqa: E402
     DatasetName,
     GraphRegime,
@@ -63,6 +63,7 @@ from priorf_teacher.schema import (  # noqa: E402
     PopulationName,
     RelationProfile,
 )
+from scripts._formal_eval_helpers import write_prompt_audit_artifact  # noqa: E402
 
 
 _HSD_QUANTILE_MAP: Final[dict[str, float]] = {
@@ -318,6 +319,27 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
         checkpoint_provenance=checkpoint_provenance,
     )
+    output_dir = args.output_root / "diagnostic" / "head_only_smoke"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    audit_entries = tuple(
+        (
+            f"diagnostic_holdout[{index}].node_id={sample.node_id}",
+            build_prompt(
+                evidence_card=sample.evidence_card,
+                mode=PromptMode.EVAL_HEAD,
+                thinking_mode=ThinkingMode.NON_THINKING,
+            ),
+            False,
+        )
+        for index, sample in enumerate(samples)
+    )
+    prompt_audit_path, prompt_audit_hash, _ = write_prompt_audit_artifact(
+        output_path=output_dir / f"prompt_audit_{dataset_enum.value}_{args.subset_size}.json",
+        dataset=dataset_enum.value,
+        eval_type="head_only_smoke_diagnostic",
+        entries=audit_entries,
+        extra={"diagnostic_only": True, "legacy_parquet": str(args.legacy_parquet)},
+    )
 
     print(f"[5/6] Running score_head on {len(samples)} samples...", flush=True)
     report: ScorerReport = score_head(
@@ -326,18 +348,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         cls_head=cls_head,
         tokenizer=tokenizer,
         thinking_mode=ThinkingMode.NON_THINKING,
+        prompt_audit_path=str(prompt_audit_path.resolve()),
+        prompt_audit_hash=prompt_audit_hash,
         accelerator=None,
     )
 
     print("[6/6] Writing ScorerReport JSON to diagnostic namespace...", flush=True)
-    output_dir = args.output_root / "diagnostic" / "head_only_smoke"
-    output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / f"scorer_report_{dataset_enum.value}_{args.subset_size}.json"
     report_payload: dict[str, Any] = json.loads(report.model_dump_json())
     report_payload["_diagnostic_provenance"] = {
         "legacy_parquet": str(args.legacy_parquet),
         "legacy_parquet_note": "legacy schema; not TeacherExportRecord",
         "cls_head": "random_linear; pre-training; numbers uninformative",
+        "prompt_audit_path": str(prompt_audit_path.resolve()),
+        "prompt_audit_hash": prompt_audit_hash,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     report_path.write_text(json.dumps(report_payload, indent=2) + "\n", encoding="utf-8")

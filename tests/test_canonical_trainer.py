@@ -13,6 +13,7 @@ from pydantic import ValidationError
 import train.train_stage2_canonical as canonical
 from eval.head_scoring import CheckpointProvenance, HeadScoringInputs, HeadScoringSample, ScorerReport
 from evidence.evidence_schema import DataManifestLike, build_evidence_card
+from evidence.leakage_policy import formal_leakage_provenance_fields
 from evidence.output_schema import PredLabel
 from evidence.prompt_builder import ThinkingMode
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
@@ -26,6 +27,18 @@ from train.train_stage2_canonical import (
     run_validation_with_unified_scorer,
 )
 
+
+
+
+def _score_head_audit_kwargs() -> dict[str, str]:
+    return {
+        "prompt_audit_path": "outputs/tests/prompt_audit.json",
+        "prompt_audit_hash": "a" * 64,
+    }
+
+
+def _formal_report_provenance_kwargs() -> dict:
+    return formal_leakage_provenance_fields(**_score_head_audit_kwargs())
 
 def _config(**overrides) -> CanonicalTrainerConfig:
     payload = {
@@ -45,6 +58,34 @@ def _config(**overrides) -> CanonicalTrainerConfig:
     }
     payload.update(overrides)
     return CanonicalTrainerConfig.model_validate(payload)
+
+
+def _clean_provenance_fields(**overrides):
+    payload = {
+        "git_commit": "1" * 40,
+        "git_dirty": False,
+        "git_diff_hash": None,
+        "teacher_export_train_sha256": "2" * 64,
+        "teacher_export_validation_sha256": "3" * 64,
+        "data_manifest_sha256": "4" * 64,
+        "teacher_checkpoint_sha256": "5" * 64,
+        "adapter_dir_sha256": "6" * 64,
+        "cls_head_sha256": "7" * 64,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _clean_leakage_fields(**overrides):
+    payload = canonical.leakage_policy_record_fields(
+        prompt_audit_path="outputs/gated/stage2/amazon/run/prompt_audit.json",
+        prompt_audit_hash="8" * 64,
+        formal_safe_result=True,
+        diagnostic_only=False,
+        code_state_clean_for_formal=True,
+    )
+    payload.update(overrides)
+    return payload
 
 
 def _relation_profile() -> RelationProfile:
@@ -141,7 +182,9 @@ class TraceTokenizer:
         text = "\n".join(message["content"] for message in messages)
         match = re.search(r"node_id:\s*(\d+)", text)
         node_id = int(match.group(1)) if match else 0
-        is_train = bool(messages[-1]["content"])
+        if kwargs.get("add_generation_prompt"):
+            return {"input_ids": torch.tensor([[11, 22, 33]], dtype=torch.long), "attention_mask": torch.ones(1, 3, dtype=torch.long)}
+        is_train = bool(messages and messages[-1]["role"] == "assistant" and messages[-1]["content"])
         suffix = 700 if is_train else 1000
         ids = torch.tensor([[11, 22, 33, suffix + node_id]], dtype=torch.long)
         return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
@@ -160,6 +203,7 @@ class TinyJointModel(torch.nn.Module):
                 "input_ids": input_ids.detach().clone(),
                 "attention_mask": attention_mask.detach().clone(),
                 "labels_present": labels is not None,
+                "labels": None if labels is None else labels.detach().clone(),
                 "output_hidden_states": output_hidden_states,
                 "use_cache": use_cache,
             }
@@ -245,13 +289,30 @@ def test_canonical_train_step_uses_three_losses_and_prompt_only_cls_path():
     assert all(call["output_hidden_states"] is True for call in model.forward_calls)
     assert all(call["use_cache"] is False for call in model.forward_calls)
 
-    # TRAIN prompts carry assistant JSON; EVAL_HEAD prompts use the assistant role with empty content.
-    assert [bool(call["messages"][-1]["content"]) for call in tokenizer.calls] == [True, False, True, False]
-    assert all(
-        call["kwargs"]
-        == {"tokenize": True, "return_dict": True, "return_tensors": "pt", "add_generation_prompt": False}
-        for call in tokenizer.calls
-    )
+    # TRAIN generation uses full assistant JSON plus a generation-prefix encode
+    # for assistant-only loss masking; EVAL_HEAD remains prompt-only.
+    assert [call["kwargs"]["add_generation_prompt"] for call in tokenizer.calls] == [
+        False,
+        True,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert [bool(call["messages"][-1]["content"]) if call["messages"][-1]["role"] == "assistant" else False for call in tokenizer.calls] == [
+        True,
+        False,
+        False,
+        True,
+        False,
+        False,
+    ]
+
+    train_labels = [call["labels"] for call in model.forward_calls if call["labels_present"]]
+    assert len(train_labels) == 2
+    for labels in train_labels:
+        assert labels.tolist()[0][:3] == [-100, -100, -100]
+        assert labels.tolist()[0][3] != -100
 
     # Classification hidden states come from the prompt-only token stream (1000+node), not TRAIN JSON stream (700+node).
     cls_last_token_values = [float(tensor[0, 0].item() / before.item()) for tensor in cls_head.inputs]
@@ -291,6 +352,9 @@ def test_validation_checkpoint_path_must_call_unified_scorer(monkeypatch: pytest
         dataset_name=DatasetName.AMAZON,
         population_name=PopulationName.VALIDATION,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        run_id="run-123",
+        report_split=PopulationName.VALIDATION,
+        eval_type="head_scoring",
         checkpoint_provenance=validation_inputs.checkpoint_provenance,
         scorer_schema_version="head_scorer/v1",
         n_total=1,
@@ -315,6 +379,7 @@ def test_validation_checkpoint_path_must_call_unified_scorer(monkeypatch: pytest
         pooling_path="pool_last_valid_token",
         uses_inference_mode=True,
         distributed_gather="none",
+        **_formal_report_provenance_kwargs(),
     )
     calls = []
 
@@ -329,6 +394,7 @@ def test_validation_checkpoint_path_must_call_unified_scorer(monkeypatch: pytest
         cls_head=TinyClsHead(),
         tokenizer=TraceTokenizer(),
         thinking_mode=ThinkingMode.NON_THINKING,
+        **_score_head_audit_kwargs(),
     )
 
     assert got is expected
@@ -363,6 +429,8 @@ def test_run_record_requires_population_metadata_and_checkpoint_provenance():
         validation_population=val_pop,
         graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
         last_step=report,
+        **_clean_provenance_fields(),
+        **_clean_leakage_fields(),
     )
 
     assert record.config == cfg
@@ -371,3 +439,156 @@ def test_run_record_requires_population_metadata_and_checkpoint_provenance():
     assert record.validation_population is not None
     assert record.validation_population.population_name == "validation"
     assert record.graph_regime == cfg.graph_regime
+    assert record.leakage_policy_version == "evidence_leakage_policy/v1"
+    assert record.git_commit == "1" * 40
+    assert record.teacher_export_train_sha256 == "2" * 64
+    assert record.teacher_export_validation_sha256 == "3" * 64
+    assert record.data_manifest_sha256 == "4" * 64
+    assert record.adapter_dir_sha256 == "6" * 64
+    assert record.prompt_audit_hash == "8" * 64
+
+
+def test_run_record_requires_hardened_provenance_and_prompt_audit_hash():
+    cfg = _config()
+    train_pop = _manifest(PopulationName.TRAIN).populations[0]
+    val_pop = _manifest(PopulationName.VALIDATION).populations[0]
+    base = {
+        "config": cfg,
+        "checkpoint_provenance": CheckpointProvenance(path="outputs/gated/ckpt.safetensors", step=1, content_hash="e" * 64),
+        "train_population": train_pop,
+        "validation_population": val_pop,
+        "graph_regime": GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_clean_provenance_fields(),
+        **_clean_leakage_fields(),
+    }
+
+    for required in (
+        "git_commit",
+        "git_dirty",
+        "teacher_export_train_sha256",
+        "teacher_export_validation_sha256",
+        "data_manifest_sha256",
+        "adapter_dir_sha256",
+        "cls_head_sha256",
+        "prompt_audit_path",
+        "prompt_audit_hash",
+    ):
+        payload = dict(base)
+        payload.pop(required)
+        with pytest.raises(ValidationError):
+            CanonicalTrainerRunRecord.model_validate(payload)
+
+
+def test_run_record_accepts_sha1_or_sha256_git_commit_but_artifact_hashes_remain_sha256():
+    cfg = _config()
+    train_pop = _manifest(PopulationName.TRAIN).populations[0]
+    val_pop = _manifest(PopulationName.VALIDATION).populations[0]
+    base = {
+        "config": cfg,
+        "checkpoint_provenance": CheckpointProvenance(path="outputs/gated/ckpt.safetensors", step=1, content_hash="e" * 64),
+        "train_population": train_pop,
+        "validation_population": val_pop,
+        "graph_regime": GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_clean_provenance_fields(),
+        **_clean_leakage_fields(),
+    }
+
+    assert CanonicalTrainerRunRecord.model_validate({**base, "git_commit": "a" * 40}).git_commit == "a" * 40
+    assert CanonicalTrainerRunRecord.model_validate({**base, "git_commit": "b" * 64}).git_commit == "b" * 64
+
+    for field_name in (
+        "git_diff_hash",
+        "teacher_export_train_sha256",
+        "teacher_export_validation_sha256",
+        "data_manifest_sha256",
+        "teacher_checkpoint_sha256",
+        "adapter_dir_sha256",
+        "cls_head_sha256",
+        "prompt_audit_hash",
+    ):
+        payload = dict(base)
+        if field_name == "git_diff_hash":
+            payload.update({"git_dirty": True, "code_state_clean_for_formal": False, "formal_safe_result": False, "diagnostic_only": True})
+        payload[field_name] = "c" * 40
+        with pytest.raises(ValidationError):
+            CanonicalTrainerRunRecord.model_validate(payload)
+
+
+def test_validation_export_hash_can_only_be_missing_for_diagnostic_runs():
+    cfg = _config()
+    train_pop = _manifest(PopulationName.TRAIN).populations[0]
+    val_pop = _manifest(PopulationName.VALIDATION).populations[0]
+
+    with pytest.raises(ValidationError, match="teacher_export_validation_sha256"):
+        CanonicalTrainerRunRecord(
+            config=cfg,
+            checkpoint_provenance=CheckpointProvenance(path="outputs/gated/ckpt.safetensors", step=1, content_hash="e" * 64),
+            train_population=train_pop,
+            validation_population=val_pop,
+            graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+            **_clean_provenance_fields(teacher_export_validation_sha256=None),
+            **_clean_leakage_fields(),
+        )
+
+    diagnostic = CanonicalTrainerRunRecord(
+        config=cfg,
+        checkpoint_provenance=CheckpointProvenance(path="outputs/gated/ckpt.safetensors", step=1, content_hash="e" * 64),
+        train_population=train_pop,
+        validation_population=val_pop,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_clean_provenance_fields(teacher_export_validation_sha256=None),
+        **_clean_leakage_fields(formal_safe_result=False, diagnostic_only=True),
+    )
+    assert diagnostic.teacher_export_validation_sha256 is None
+    assert diagnostic.diagnostic_only is True
+
+
+def test_dirty_run_cannot_be_formal_safe_without_diagnostic_downgrade():
+    cfg = _config()
+    train_pop = _manifest(PopulationName.TRAIN).populations[0]
+    val_pop = _manifest(PopulationName.VALIDATION).populations[0]
+
+    with pytest.raises(ValidationError, match="formal_safe_result"):
+        CanonicalTrainerRunRecord(
+            config=cfg,
+            checkpoint_provenance=CheckpointProvenance(path="outputs/gated/ckpt.safetensors", step=1, content_hash="e" * 64),
+            train_population=train_pop,
+            validation_population=val_pop,
+            graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+            **_clean_provenance_fields(git_dirty=True, git_diff_hash="9" * 64),
+            **_clean_leakage_fields(code_state_clean_for_formal=False),
+        )
+
+    downgraded = CanonicalTrainerRunRecord(
+        config=cfg,
+        checkpoint_provenance=CheckpointProvenance(path="outputs/gated/ckpt.safetensors", step=1, content_hash="e" * 64),
+        train_population=train_pop,
+        validation_population=val_pop,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        **_clean_provenance_fields(git_dirty=True, git_diff_hash="9" * 64),
+        **_clean_leakage_fields(
+            formal_safe_result=False,
+            diagnostic_only=True,
+            code_state_clean_for_formal=False,
+        ),
+    )
+    assert downgraded.formal_safe_result is False
+    assert downgraded.diagnostic_only is True
+
+
+def test_old_run_record_without_leakage_and_provenance_fields_fails_clean_validation():
+    cfg = _config()
+    train_pop = _manifest(PopulationName.TRAIN).populations[0]
+    val_pop = _manifest(PopulationName.VALIDATION).populations[0]
+    old_payload = {
+        "schema_version": "canonical_trainer_run/v1",
+        "config": cfg.model_dump(mode="json"),
+        "checkpoint_provenance": {"path": "outputs/gated/ckpt.safetensors", "step": 1, "content_hash": "e" * 64},
+        "train_population": train_pop.model_dump(mode="json"),
+        "validation_population": val_pop.model_dump(mode="json"),
+        "graph_regime": GraphRegime.TRANSDUCTIVE_STANDARD.value,
+        "last_step": None,
+        "validation_report": None,
+    }
+    with pytest.raises(ValidationError):
+        CanonicalTrainerRunRecord.model_validate(old_payload)

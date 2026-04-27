@@ -15,9 +15,22 @@ from typing import Literal
 
 import numpy as np
 import sklearn.metrics
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
 
 from eval.head_scoring import CheckpointProvenance, ScorerReport
+from evidence.leakage_policy import (
+    EVIDENCE_CARD_PROJECTION,
+    FORMAL_SAFE_RESULT,
+    HEX64_PATTERN,
+    LEAKAGE_POLICY_VERSION,
+    NEIGHBOR_LABEL_COUNTS_VISIBLE,
+    NEIGHBOR_LABEL_POLICY,
+    STUDENT_VISIBLE_FORBIDDEN_FIELD_PATHS,
+    TEACHER_LOGIT_MASKED,
+    TEACHER_PROB_MASKED,
+    formal_leakage_provenance_fields,
+    validate_formal_leakage_payload,
+)
 from llm.fusion import fuse_probabilities
 from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName
 
@@ -182,12 +195,50 @@ class FusionSelectionSummary(BaseModel):
 class FusionEvalReport(BaseModel):
     model_config = _STRICT_MODEL_CONFIG
 
+    dataset_name: DatasetName
+    graph_regime: GraphRegime
+    run_id: StrictStr = Field(min_length=1)
+    validation_split: Literal[PopulationName.VALIDATION]
+    eval_type: Literal["fusion"]
+    report_split: PopulationName
+    selected_alpha: float = Field(ge=0.0, le=1.0)
     checkpoint_provenance: CheckpointProvenance
-    selected_on_validation_only: Literal[True] = True
+    selected_on_validation_only: Literal[True]
     student_contribution_pass: bool
     validation_metrics: PopulationFusionMetrics
     report_metrics: PopulationFusionMetrics
     selection: FusionSelectionSummary
+    leakage_policy_version: Literal["evidence_leakage_policy/v1"]
+    neighbor_label_policy: Literal["removed_from_student_visible"]
+    evidence_card_projection: Literal["student_safe_v1"]
+    student_visible_forbidden_fields: tuple[str, ...]
+    teacher_prob_masked: Literal[True]
+    teacher_logit_masked: Literal[True]
+    neighbor_label_counts_visible: Literal[False]
+    formal_safe_result: Literal[True]
+    prompt_audit_path: StrictStr = Field(min_length=1)
+    prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
+
+    @model_validator(mode="after")
+    def _report_consistent(self) -> "FusionEvalReport":
+        validate_formal_leakage_payload(self.model_dump(mode="python"), context="FusionEvalReport")
+        if self.dataset_name != self.validation_metrics.population.dataset_name:
+            raise ValueError("dataset_name must match validation population")
+        if self.dataset_name != self.report_metrics.population.dataset_name:
+            raise ValueError("dataset_name must match report population")
+        if self.graph_regime != self.validation_metrics.population.graph_regime:
+            raise ValueError("graph_regime must match validation population")
+        if self.graph_regime != self.report_metrics.population.graph_regime:
+            raise ValueError("graph_regime must match report population")
+        if self.validation_split != self.validation_metrics.population.population_name:
+            raise ValueError("validation_split must match validation metrics population")
+        if self.report_split != self.report_metrics.population.population_name:
+            raise ValueError("report_split must match report metrics population")
+        if self.report_split == PopulationName.VALIDATION:
+            raise ValueError("report_split must be test-like, not validation")
+        if abs(float(self.selected_alpha) - float(self.selection.optimal_alpha)) > 1e-12:
+            raise ValueError("selected_alpha must equal selection.optimal_alpha")
+        return self
 
 
 def run_formal_fusion_eval(
@@ -195,6 +246,9 @@ def run_formal_fusion_eval(
     validation_inputs: FusionPopulationInputs,
     report_inputs: FusionPopulationInputs,
     config: FusionEvalConfig = FusionEvalConfig(),
+    run_id: str,
+    prompt_audit_path: str,
+    prompt_audit_hash: str,
 ) -> FusionEvalReport:
     """Tune alpha on validation only, then report with the frozen alpha elsewhere."""
 
@@ -308,7 +362,15 @@ def run_formal_fusion_eval(
     )
 
     return FusionEvalReport(
+        dataset_name=validation_inputs.head_report.dataset_name,
+        graph_regime=validation_inputs.head_report.graph_regime,
+        run_id=run_id,
+        validation_split=PopulationName.VALIDATION,
+        eval_type="fusion",
+        report_split=report_inputs.head_report.population_name,
+        selected_alpha=optimal_alpha,
         checkpoint_provenance=validation_inputs.head_report.checkpoint_provenance,
+        selected_on_validation_only=True,
         student_contribution_pass=student_contribution_pass,
         validation_metrics=PopulationFusionMetrics(
             population=_population_metadata(validation_inputs),
@@ -332,6 +394,10 @@ def run_formal_fusion_eval(
             teacher_guardrail_baseline=teacher_guardrail_baseline,
             secondary_guardrail_pass=secondary_guardrail_pass,
             teacher_degradation_tolerance_triggered=teacher_degradation_tolerance_triggered,
+        ),
+        **formal_leakage_provenance_fields(
+            prompt_audit_path=prompt_audit_path,
+            prompt_audit_hash=prompt_audit_hash,
         ),
     )
 

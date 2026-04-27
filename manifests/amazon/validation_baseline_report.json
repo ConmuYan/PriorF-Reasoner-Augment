@@ -1,0 +1,14 @@
+{
+  "dataset_name": "amazon",
+  "teacher_model_name": "LGHGCLNetV2",
+  "teacher_checkpoint_sha256": "ca8ae67eb12c619dec3459a48039f14c0762d32f5bd85577d980217dbe21f894",
+  "graph_regime": "transductive_standard",
+  "population_name": "validation",
+  "metric_name": "auroc",
+  "metric_value": 0.9744253377785577,
+  "threshold": 0.8,
+  "passed": true,
+  "data_manifest_sha256": "b73c7fe773775ad08e0060e6e0771126d92f72064c00eb349b32ce0b5c8d1100",
+  "code_git_sha": "eaefd5946c823ec22c8f6191553fc1cdaa5a89d1",
+  "export_timestamp_utc": "2026-04-24T04:49:30.650188Z"
+}

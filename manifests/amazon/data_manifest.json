@@ -1,0 +1,45 @@
+{
+  "schema_version": "priorf-reasoner.data-manifest.v1",
+  "dataset_name": "amazon",
+  "graph_regime": "transductive_standard",
+  "feature_dim": 25,
+  "relation_count": 3,
+  "num_nodes": 11944,
+  "populations": [
+    {
+      "population_name": "train",
+      "split_values": [
+        "train"
+      ],
+      "node_ids_hash": "e4bef818e46e3897c039e1fed4763b35a5d1a6e49ad3a4f1264a089ad607b3ed",
+      "contains_tuning_rows": false,
+      "contains_final_test_rows": false
+    },
+    {
+      "population_name": "validation",
+      "split_values": [
+        "validation"
+      ],
+      "node_ids_hash": "2ca2b3b2c6a1fc1d42fdcaabece8f3c0a7f0050f9b1679440998d932057c0c3b",
+      "contains_tuning_rows": true,
+      "contains_final_test_rows": false
+    },
+    {
+      "population_name": "final_test",
+      "split_values": [
+        "final_test"
+      ],
+      "node_ids_hash": "c761e96d53fa77c5f3984843a22442fb30a892ba5054fb6864828d0526a00441",
+      "contains_tuning_rows": false,
+      "contains_final_test_rows": true
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "source_mat",
+      "path": "/data1/mq/codes/graph-detection-main/PriorF-Reasoner/assets/data/Amazon_canonical.mat",
+      "sha256": "dceb8ccb937fd311561c20947509a7142bfeb632530bbd2290a3e56c87efae7f"
+    }
+  ],
+  "created_at_utc": "2026-04-24T04:49:30.647586Z"
+}
