@@ -15,10 +15,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from eval.eval_gen_only import GenOnlyEvalInputs, GenOnlyEvalSample, _try_parse_normalized, _try_parse_strict, evaluate_gen_only  # noqa: E402
 from evidence.evidence_schema import build_student_evidence_card  # noqa: E402
+from evidence.prompt_builder import PromptMode, ThinkingMode  # noqa: E402
 from graph_data.manifests import load_data_manifest  # noqa: E402
 from priorf_teacher.export_pipeline import read_teacher_export_artifact  # noqa: E402
 from priorf_teacher.schema import DatasetName, GraphRegime, PopulationName  # noqa: E402
 from scripts._formal_eval_helpers import (  # noqa: E402
+    build_eval_prompt_audit_entries,
     build_subset_runtime_provenance,
     capture_git_state,
     current_python_command,
@@ -26,6 +28,7 @@ from scripts._formal_eval_helpers import (  # noqa: E402
     generate_structured_outputs,
     hash_directory_files,
     stratified_records,
+    write_prompt_audit_artifact,
 )
 
 _AUDIT_SCHEMA_VERSION: Final[str] = "generation_audit/v1"
@@ -187,6 +190,21 @@ def main(argv: list[str] | None = None) -> int:
         f"max_new_tokens={int(args.max_new_tokens)}",
         flush=True,
     )
+    prompt_audit_path, prompt_audit_hash, _prompt_audit_payload = write_prompt_audit_artifact(
+        output_path=args.output_dir / f"prompt_audit_generation_audit_{args.dataset}_{args.population}.json",
+        dataset=args.dataset,
+        eval_type="generation_audit",
+        entries=build_eval_prompt_audit_entries(
+            records,
+            data_manifest,
+            population=population_enum,
+            mode=PromptMode.EVAL_GEN,
+            thinking_mode=ThinkingMode.NON_THINKING,
+            include_assistant_target=False,
+            location_prefix=args.population,
+        ),
+        extra={"population": args.population, "samples": len(records)},
+    )
 
     print("[2/6] Loading backbone + PEFT adapter...", flush=True)
     bundle = _load_generation_model(
@@ -201,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         data_manifest,
         model=bundle["model"],
         tokenizer=bundle["tokenizer"],
-        thinking_mode="non_thinking",
+        thinking_mode=ThinkingMode.NON_THINKING,
         max_new_tokens=int(args.max_new_tokens),
         progress_label="audit-gen",
     )
@@ -223,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
             population_name=population_enum,
             graph_regime=graph_regime,
             run_id=args.run_id,
+            prompt_audit_path=str(prompt_audit_path.resolve()),
+            prompt_audit_hash=prompt_audit_hash,
         )
     )
 
@@ -251,6 +271,16 @@ def main(argv: list[str] | None = None) -> int:
         "dataset_name": dataset_enum.value,
         "population_name": population_enum.value,
         "graph_regime": graph_regime.value,
+        "leakage_policy_version": report.leakage_policy_version,
+        "neighbor_label_policy": report.neighbor_label_policy,
+        "evidence_card_projection": report.evidence_card_projection,
+        "student_visible_forbidden_fields": list(report.student_visible_forbidden_fields),
+        "teacher_prob_masked": report.teacher_prob_masked,
+        "teacher_logit_masked": report.teacher_logit_masked,
+        "neighbor_label_counts_visible": report.neighbor_label_counts_visible,
+        "formal_safe_result": report.formal_safe_result,
+        "prompt_audit_path": str(prompt_audit_path.resolve()),
+        "prompt_audit_hash": prompt_audit_hash,
         "n_total": int(report.n_total),
         "syntax": {
             "headline_metric_name": report.headline_metric_name,
@@ -280,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
             "peft_adapter_sha256": bundle["peft_adapter_sha256"],
             "data_manifest": str(args.data_manifest),
             "data_manifest_sha256": file_sha256(args.data_manifest),
+            "prompt_audit_path": str(prompt_audit_path.resolve()),
+            "prompt_audit_hash": prompt_audit_hash,
             "audit_command": current_python_command(),
             **capture_git_state(REPO_ROOT),
             **build_subset_runtime_provenance(
