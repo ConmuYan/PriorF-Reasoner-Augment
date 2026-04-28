@@ -9,8 +9,13 @@ import torch
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from eval.head_scoring import CheckpointProvenance
 from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
-from scripts.run_formal_gen_only_eval import _parse_args as _parse_formal_gen_only_args
-from scripts._formal_eval_helpers import _trim_trailing_text_after_strict_json, build_head_scoring_inputs, generate_structured_outputs
+from scripts.run_formal_gen_only_eval import _parse_args as _parse_formal_gen_only_args, _split_indexed_records
+from scripts._formal_eval_helpers import (
+    _trim_trailing_text_after_strict_json,
+    build_head_scoring_inputs,
+    generate_structured_outputs,
+    stratified_records,
+)
 
 
 _SUBPROCESS_ENV = {
@@ -218,6 +223,50 @@ def test_generate_structured_outputs_batches_eval_gen_prompts() -> None:
         '{"rationale":"r","evidence":["e"],"pattern_hint":"p","label":"fraud","score":0.9}',
     )
     assert model.batch_sizes == [2]
+
+
+def test_stratified_records_preserves_minority_class_under_imbalance() -> None:
+    records = tuple(
+        _record().model_copy(update={"node_id": index, "ground_truth_label": int(index < 3)})
+        for index in range(100)
+    )
+
+    subset = stratified_records(records, subset_size=20, seed=0)
+    positives = [record for record in subset if int(record.ground_truth_label) == 1]
+    negatives = [record for record in subset if int(record.ground_truth_label) == 0]
+
+    assert len(subset) == 20
+    assert len(positives) >= 1
+    assert len(negatives) >= 1
+
+
+def test_parallel_shards_spread_minority_examples_for_imbalanced_subset() -> None:
+    records = tuple(
+        _record().model_copy(update={"node_id": index, "ground_truth_label": int(index < 10)})
+        for index in range(100)
+    )
+    subset = stratified_records(records, subset_size=20, seed=0)
+
+    shards = _split_indexed_records(subset, shard_count=2)
+    shard_positive_counts = [
+        sum(1 for _, record in shard if int(record.ground_truth_label) == 1)
+        for shard in shards
+    ]
+
+    assert sum(shard_positive_counts) >= 2
+    assert all(count >= 1 for count in shard_positive_counts)
+
+
+def test_stratified_records_handles_single_class_population() -> None:
+    records = tuple(
+        _record().model_copy(update={"node_id": index, "ground_truth_label": 0})
+        for index in range(25)
+    )
+
+    subset = stratified_records(records, subset_size=10, seed=0)
+
+    assert len(subset) == 10
+    assert {int(record.ground_truth_label) for record in subset} == {0}
 
 
 
