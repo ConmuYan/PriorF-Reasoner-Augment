@@ -245,6 +245,8 @@ def generate_structured_outputs(
     thinking_mode: ThinkingMode,
     max_new_tokens: int,
     batch_size: int = 1,
+    stop_after_strict_json: bool = True,
+    stop_check_every: int = 8,
     progress_label: str | None = None,
     progress_every: int | None = None,
 ) -> tuple[str, ...]:
@@ -252,6 +254,8 @@ def generate_structured_outputs(
         raise ValueError("max_new_tokens must be >= 1")
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
+    if stop_check_every < 1:
+        raise ValueError("stop_check_every must be >= 1")
 
     try:
         device = next(model.parameters()).device
@@ -306,17 +310,29 @@ def generate_structured_outputs(
             )
             input_ids = input_ids_cpu.to(device)
             attention_mask = attention_mask_cpu.to(device)
-            generated_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=int(max_new_tokens),
-                do_sample=False,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                pad_token_id=pad_token_id,
-                eos_token_id=eos_token_id,
-            )
+            generation_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": int(max_new_tokens),
+                "do_sample": False,
+                "temperature": None,
+                "top_p": None,
+                "top_k": None,
+                "pad_token_id": pad_token_id,
+                "eos_token_id": eos_token_id,
+            }
+            if stop_after_strict_json:
+                from transformers import StoppingCriteriaList
+
+                generation_kwargs["stopping_criteria"] = StoppingCriteriaList([
+                    _StopAfterStrictJsonCriteria(
+                        tokenizer=tokenizer,
+                        prompt_length=int(input_ids.shape[1]),
+                        batch_size=len(batch_records),
+                        check_every=int(stop_check_every),
+                    )
+                ])
+            generated_ids = model.generate(**generation_kwargs)
             if generated_ids.dim() != 2 or int(generated_ids.shape[0]) != len(batch_records):
                 raise ValueError("model.generate must return a [B, T] token tensor")
             for row_index in range(len(batch_records)):
@@ -351,6 +367,46 @@ def generate_structured_outputs(
                     flush=True,
                 )
     return tuple(generated_texts)
+
+
+class _StopAfterStrictJsonCriteria:
+    """Stop greedy generation once every batch row has produced strict JSON."""
+
+    def __init__(
+        self,
+        *,
+        tokenizer: Any,
+        prompt_length: int,
+        batch_size: int,
+        check_every: int,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.prompt_length = int(prompt_length)
+        self.finished = [False for _ in range(int(batch_size))]
+        self.check_every = int(check_every)
+        self.calls = 0
+
+    def __call__(self, input_ids: torch.Tensor, scores: Any, **kwargs: Any) -> bool:
+        del scores, kwargs
+        self.calls += 1
+        if self.calls % self.check_every != 0:
+            return False
+        if input_ids.dim() != 2 or int(input_ids.shape[1]) <= self.prompt_length:
+            return False
+        for row_index in range(min(len(self.finished), int(input_ids.shape[0]))):
+            if self.finished[row_index]:
+                continue
+            continuation_ids = input_ids[row_index, self.prompt_length:]
+            text = self.tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
+            candidate = _trim_trailing_text_after_strict_json(text)
+            if not candidate:
+                continue
+            try:
+                parse_strict(candidate)
+            except Exception:
+                continue
+            self.finished[row_index] = True
+        return all(self.finished)
 
 
 def _left_pad_generation_batch(

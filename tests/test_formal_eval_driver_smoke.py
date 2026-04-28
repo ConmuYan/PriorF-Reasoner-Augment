@@ -101,12 +101,26 @@ class _GenerateModel(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
         self.batch_sizes: list[int] = []
 
-    def generate(self, *, input_ids, attention_mask, max_new_tokens, do_sample, temperature, top_p, top_k, pad_token_id, eos_token_id):
+    def generate(
+        self,
+        *,
+        input_ids,
+        attention_mask,
+        max_new_tokens,
+        do_sample,
+        temperature,
+        top_p,
+        top_k,
+        pad_token_id,
+        eos_token_id,
+        stopping_criteria=None,
+    ):
         assert do_sample is False
         assert temperature is None
         assert top_p is None
         assert top_k is None
         assert max_new_tokens == 16
+        assert stopping_criteria is not None
         self.batch_sizes.append(int(input_ids.shape[0]))
         continuation = torch.full((input_ids.shape[0], 1), 99, dtype=input_ids.dtype, device=input_ids.device)
         return torch.cat([input_ids, continuation], dim=1)
@@ -286,6 +300,7 @@ def test_run_formal_gen_only_eval_defaults_to_768_tokens() -> None:
 
     assert args.max_new_tokens == 768
     assert args.batch_size == 1
+    assert args.stop_after_strict_json is True
 
 
 

@@ -62,6 +62,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--review-sample-size", type=int, default=12)
     parser.add_argument("--max-new-tokens", type=int, default=768)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--stop-after-strict-json", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--stop-check-every", type=int, default=8)
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=16)
@@ -230,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
         thinking_mode=ThinkingMode.NON_THINKING,
         max_new_tokens=int(args.max_new_tokens),
         batch_size=int(args.batch_size),
+        stop_after_strict_json=bool(args.stop_after_strict_json),
+        stop_check_every=int(args.stop_check_every),
         progress_label="audit-gen",
         progress_every=args.progress_every,
     )
@@ -324,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
             "prompt_audit_hash": prompt_audit_hash,
             "max_new_tokens": int(args.max_new_tokens),
             "batch_size": int(args.batch_size),
+            "stop_after_strict_json": bool(args.stop_after_strict_json),
+            "stop_check_every": int(args.stop_check_every),
             "audit_command": current_python_command(),
             **capture_git_state(REPO_ROOT),
             **build_subset_runtime_provenance(
