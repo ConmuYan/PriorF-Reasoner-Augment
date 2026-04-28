@@ -244,11 +244,14 @@ def generate_structured_outputs(
     tokenizer: Any,
     thinking_mode: ThinkingMode,
     max_new_tokens: int,
+    batch_size: int = 1,
     progress_label: str | None = None,
     progress_every: int | None = None,
 ) -> tuple[str, ...]:
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be >= 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
 
     try:
         device = next(model.parameters()).device
@@ -266,28 +269,43 @@ def generate_structured_outputs(
     generation_started_at = time.perf_counter()
     model.eval()
     with torch.inference_mode():
-        for record_index, record in enumerate(records, start=1):
-            card = build_student_evidence_card(teacher_record=record, data_manifest=data_manifest)
-            bundle = build_prompt(
-                evidence_card=card,
-                mode=PromptMode.EVAL_GEN,
-                thinking_mode=thinking_mode,
+        for batch_start in range(0, total_records, batch_size):
+            batch_records = records[batch_start:batch_start + batch_size]
+            encoded_rows: list[tuple[torch.Tensor, torch.Tensor]] = []
+            for record in batch_records:
+                card = build_student_evidence_card(teacher_record=record, data_manifest=data_manifest)
+                bundle = build_prompt(
+                    evidence_card=card,
+                    mode=PromptMode.EVAL_GEN,
+                    thinking_mode=thinking_mode,
+                )
+                if bundle.messages[-1].role != "assistant" or bundle.messages[-1].content:
+                    raise ValueError("eval_gen prompt must end with an empty assistant message")
+                messages = [
+                    {"role": message.role, "content": message.content}
+                    for message in bundle.messages[:-1]
+                ]
+                encoded = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                    add_generation_prompt=True,
+                )
+                row_input_ids = encoded["input_ids"]
+                row_attention_mask = encoded["attention_mask"]
+                if row_input_ids.dim() != 2 or int(row_input_ids.shape[0]) != 1:
+                    raise ValueError("tokenizer.apply_chat_template must return a [1, T] input_ids tensor")
+                if row_attention_mask.shape != row_input_ids.shape:
+                    raise ValueError("attention_mask shape must match input_ids shape")
+                encoded_rows.append((row_input_ids[0], row_attention_mask[0]))
+
+            input_ids_cpu, attention_mask_cpu = _left_pad_generation_batch(
+                encoded_rows,
+                pad_token_id=int(pad_token_id),
             )
-            if bundle.messages[-1].role != "assistant" or bundle.messages[-1].content:
-                raise ValueError("eval_gen prompt must end with an empty assistant message")
-            messages = [
-                {"role": message.role, "content": message.content}
-                for message in bundle.messages[:-1]
-            ]
-            encoded = tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-                add_generation_prompt=True,
-            )
-            input_ids = encoded["input_ids"].to(device)
-            attention_mask = encoded["attention_mask"].to(device)
+            input_ids = input_ids_cpu.to(device)
+            attention_mask = attention_mask_cpu.to(device)
             generated_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -299,18 +317,20 @@ def generate_structured_outputs(
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
             )
-            if generated_ids.dim() != 2 or int(generated_ids.shape[0]) != 1:
-                raise ValueError("model.generate must return a [1, T] token tensor")
-            continuation_ids = generated_ids[0, input_ids.shape[1]:]
-            if int(continuation_ids.shape[0]) < 1:
-                raise ValueError("model.generate returned no continuation tokens")
-            generated_text = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
-            generated_text = _trim_trailing_text_after_strict_json(generated_text)
-            if not generated_text:
-                raise ValueError("model.generate decoded to empty text")
-            generated_texts.append(generated_text)
+            if generated_ids.dim() != 2 or int(generated_ids.shape[0]) != len(batch_records):
+                raise ValueError("model.generate must return a [B, T] token tensor")
+            for row_index in range(len(batch_records)):
+                continuation_ids = generated_ids[row_index, input_ids.shape[1]:]
+                if int(continuation_ids.shape[0]) < 1:
+                    raise ValueError("model.generate returned no continuation tokens")
+                generated_text = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
+                generated_text = _trim_trailing_text_after_strict_json(generated_text)
+                if not generated_text:
+                    raise ValueError("model.generate decoded to empty text")
+                generated_texts.append(generated_text)
+            record_index = min(batch_start + len(batch_records), total_records)
             if progress_label is not None and (
-                record_index == 1
+                batch_start == 0
                 or record_index == total_records
                 or record_index % progress_interval == 0
             ):
@@ -331,6 +351,50 @@ def generate_structured_outputs(
                     flush=True,
                 )
     return tuple(generated_texts)
+
+
+def _left_pad_generation_batch(
+    encoded_rows: list[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not encoded_rows:
+        raise ValueError("encoded_rows must not be empty")
+    max_length = max(int(input_ids.shape[0]) for input_ids, _ in encoded_rows)
+    batch_input_ids = []
+    batch_attention_mask = []
+    for input_ids, attention_mask in encoded_rows:
+        row_length = int(input_ids.shape[0])
+        pad_length = max_length - row_length
+        if pad_length < 0:
+            raise ValueError("pad_length must be non-negative")
+        if pad_length:
+            input_ids = torch.cat(
+                [
+                    torch.full(
+                        (pad_length,),
+                        fill_value=int(pad_token_id),
+                        dtype=input_ids.dtype,
+                        device=input_ids.device,
+                    ),
+                    input_ids,
+                ],
+                dim=0,
+            )
+            attention_mask = torch.cat(
+                [
+                    torch.zeros(
+                        (pad_length,),
+                        dtype=attention_mask.dtype,
+                        device=attention_mask.device,
+                    ),
+                    attention_mask,
+                ],
+                dim=0,
+            )
+        batch_input_ids.append(input_ids)
+        batch_attention_mask.append(attention_mask)
+    return torch.stack(batch_input_ids, dim=0), torch.stack(batch_attention_mask, dim=0)
 
 
 def _trim_trailing_text_after_strict_json(text: str) -> str:

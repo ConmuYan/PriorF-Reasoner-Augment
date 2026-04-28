@@ -114,11 +114,12 @@ def _parse_args(argv=None):
     p.add_argument("--data-manifest", required=True, type=Path)
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument("--gpu-index", type=int, default=0)
-    p.add_argument("--validation-subset", type=int, default=256)
-    p.add_argument("--final-test-subset", type=int, default=256)
+    p.add_argument("--validation-subset", type=int, default=None)
+    p.add_argument("--final-test-subset", type=int, default=None)
     p.add_argument("--calibration-bins", type=int, default=10)
     p.add_argument("--apply-temperature-scaling", action="store_true")
     p.add_argument("--include-oracle-diagnostics", action="store_true")
+    p.add_argument("--progress-every", type=int, default=64)
     p.add_argument("--run-id", required=True)
     p.add_argument("--commit", required=True, help="Git commit sha (40 hex) of the training run.")
     p.add_argument("--config-fingerprint", required=True, help="Same fingerprint used at training time.")
@@ -276,6 +277,7 @@ def main(argv=None) -> int:  # noqa: C901
         calibration_bins=int(args.calibration_bins),
         apply_temperature_scaling=bool(args.apply_temperature_scaling),
         accelerator=None,
+        scorer_progress_every=args.progress_every,
     )
 
     print("[6/6] Writing FormalHeadOnlyReport JSON...", flush=True)

@@ -41,6 +41,7 @@ Distributed contract (when ``accelerator`` is not ``None``):
 from __future__ import annotations
 
 import math
+import time
 from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
@@ -253,6 +254,8 @@ def score_head(
     prompt_audit_path: str,
     prompt_audit_hash: str,
     accelerator: "object | None" = None,
+    progress_label: str | None = None,
+    progress_every: int | None = None,
 ) -> ScorerReport:
     """Run the canonical head ``predict_proba`` path and return a ``ScorerReport``.
 
@@ -293,9 +296,12 @@ def score_head(
     local_probs: list[float] = []
     local_labels: list[int] = []
     local_node_ids: list[int] = []
+    total_samples = len(inputs.samples)
+    progress_interval = max(1, progress_every or max(1, total_samples // 10))
+    scoring_started_at = time.perf_counter()
 
     with torch.inference_mode():
-        for sample in inputs.samples:
+        for sample_index, sample in enumerate(inputs.samples, start=1):
             bundle = build_prompt(
                 evidence_card=sample.evidence_card,
                 mode=PromptMode.EVAL_HEAD,
@@ -341,6 +347,27 @@ def score_head(
             local_probs.append(prob_value)
             local_labels.append(int(sample.ground_truth_label))
             local_node_ids.append(int(sample.node_id))
+            if progress_label is not None and (
+                sample_index == 1
+                or sample_index == total_samples
+                or sample_index % progress_interval == 0
+            ):
+                elapsed_seconds = time.perf_counter() - scoring_started_at
+                samples_per_second = (
+                    float(sample_index) / elapsed_seconds if elapsed_seconds > 0.0 else float("inf")
+                )
+                eta_seconds = (
+                    float(total_samples - sample_index) / samples_per_second
+                    if math.isfinite(samples_per_second) and samples_per_second > 0.0
+                    else float("nan")
+                )
+                print(
+                    f"       [{progress_label}] {sample_index}/{total_samples} "
+                    f"elapsed={_format_duration_seconds(elapsed_seconds)} "
+                    f"eta={_format_duration_seconds(eta_seconds)} "
+                    f"rate={samples_per_second:.2f} samples/s",
+                    flush=True,
+                )
 
     local_probs_t = torch.tensor(local_probs, dtype=torch.float32)
     local_labels_t = torch.tensor(local_labels, dtype=torch.long)
@@ -430,3 +457,14 @@ def score_head(
             prompt_audit_hash=prompt_audit_hash,
         ),
     )
+
+
+def _format_duration_seconds(seconds: float) -> str:
+    if not math.isfinite(seconds) or seconds < 0.0:
+        return "unknown"
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"

@@ -61,8 +61,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--subset-size", type=int, default=128)
     parser.add_argument("--review-sample-size", type=int, default=12)
     parser.add_argument("--max-new-tokens", type=int, default=768)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--progress-every", type=int, default=16)
     parser.add_argument("--run-id", required=True)
     return parser.parse_args(argv)
 
@@ -227,7 +229,9 @@ def main(argv: list[str] | None = None) -> int:
         tokenizer=bundle["tokenizer"],
         thinking_mode=ThinkingMode.NON_THINKING,
         max_new_tokens=int(args.max_new_tokens),
+        batch_size=int(args.batch_size),
         progress_label="audit-gen",
+        progress_every=args.progress_every,
     )
 
     print("[4/6] Computing gen-only syntax and discriminative summaries...", flush=True)
@@ -318,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
             "data_manifest_sha256": file_sha256(args.data_manifest),
             "prompt_audit_path": str(prompt_audit_path.resolve()),
             "prompt_audit_hash": prompt_audit_hash,
+            "max_new_tokens": int(args.max_new_tokens),
+            "batch_size": int(args.batch_size),
             "audit_command": current_python_command(),
             **capture_git_state(REPO_ROOT),
             **build_subset_runtime_provenance(

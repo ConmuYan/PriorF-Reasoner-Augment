@@ -42,8 +42,8 @@ def _parse_args(argv=None):
     parser.add_argument("--teacher-export-final-test", required=True, type=Path)
     parser.add_argument("--data-manifest", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--validation-subset", type=int, default=256)
-    parser.add_argument("--final-test-subset", type=int, default=256)
+    parser.add_argument("--validation-subset", type=int, default=None)
+    parser.add_argument("--final-test-subset", type=int, default=None)
     parser.add_argument("--alpha-candidates", nargs="+", type=float, default=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
     parser.add_argument("--primary-metric", choices=["auprc", "auroc", "f1_at_frozen_threshold"], default="auprc")
     parser.add_argument("--teacher-degradation-tolerance", type=float, default=0.0)
@@ -52,6 +52,7 @@ def _parse_args(argv=None):
     parser.add_argument("--tie-breaker", choices=["smaller_alpha", "larger_alpha"], default="smaller_alpha")
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--progress-every", type=int, default=64)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--config-fingerprint", required=True)
@@ -147,6 +148,8 @@ def main(argv=None) -> int:
         prompt_audit_path=str(prompt_audit_path.resolve()),
         prompt_audit_hash=prompt_audit_hash,
         accelerator=None,
+        progress_label="fusion-validation",
+        progress_every=args.progress_every,
     )
     report_head_report = score_head(
         inputs=report_head_inputs,
@@ -157,6 +160,8 @@ def main(argv=None) -> int:
         prompt_audit_path=str(prompt_audit_path.resolve()),
         prompt_audit_hash=prompt_audit_hash,
         accelerator=None,
+        progress_label="fusion-final_test",
+        progress_every=args.progress_every,
     )
 
     print("[4/5] Running run_formal_fusion_eval...", flush=True)

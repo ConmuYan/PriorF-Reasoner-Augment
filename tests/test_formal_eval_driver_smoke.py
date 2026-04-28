@@ -99,6 +99,7 @@ class _GenerateModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.batch_sizes: list[int] = []
 
     def generate(self, *, input_ids, attention_mask, max_new_tokens, do_sample, temperature, top_p, top_k, pad_token_id, eos_token_id):
         assert do_sample is False
@@ -106,7 +107,9 @@ class _GenerateModel(torch.nn.Module):
         assert top_p is None
         assert top_k is None
         assert max_new_tokens == 16
-        return torch.cat([input_ids, torch.tensor([[99]], device=input_ids.device)], dim=1)
+        self.batch_sizes.append(int(input_ids.shape[0]))
+        continuation = torch.full((input_ids.shape[0], 1), 99, dtype=input_ids.dtype, device=input_ids.device)
+        return torch.cat([input_ids, continuation], dim=1)
 
 
 
@@ -176,6 +179,31 @@ def test_generate_structured_outputs_progress_logging(capsys) -> None:
     assert "[audit-gen] 1/2" in captured.out
     assert "[audit-gen] 2/2" in captured.out
     assert "eta=" in captured.out
+
+
+def test_generate_structured_outputs_batches_eval_gen_prompts() -> None:
+    tokenizer = _GenerateTokenizer()
+    model = _GenerateModel()
+    records = (
+        _record(),
+        _record().model_copy(update={"node_id": 4}),
+    )
+
+    generated = generate_structured_outputs(
+        records,
+        _manifest(),
+        model=model,
+        tokenizer=tokenizer,
+        thinking_mode="non_thinking",
+        max_new_tokens=16,
+        batch_size=2,
+    )
+
+    assert generated == (
+        '{"rationale":"r","evidence":["e"],"pattern_hint":"p","label":"fraud","score":0.9}',
+        '{"rationale":"r","evidence":["e"],"pattern_hint":"p","label":"fraud","score":0.9}',
+    )
+    assert model.batch_sizes == [2]
 
 
 
@@ -257,6 +285,7 @@ def test_run_formal_gen_only_eval_defaults_to_768_tokens() -> None:
     )
 
     assert args.max_new_tokens == 768
+    assert args.batch_size == 1
 
 
 

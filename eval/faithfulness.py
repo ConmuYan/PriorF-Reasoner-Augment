@@ -225,6 +225,8 @@ def evaluate_faithfulness(
     cls_head,
     tokenizer,
     accelerator: object | None = None,
+    progress_label_prefix: str | None = None,
+    progress_every: int | None = None,
 ) -> FaithfulnessReport:
     """Run formal faithfulness variants through the frozen head-scoring path."""
 
@@ -239,6 +241,8 @@ def evaluate_faithfulness(
         prompt_audit_path=validated_inputs.prompt_audit_path,
         prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
+        progress_label=f"{progress_label_prefix}-full" if progress_label_prefix else None,
+        progress_every=progress_every,
     )
     sufficiency_report = score_head(
         inputs=_with_ablation(
@@ -252,6 +256,8 @@ def evaluate_faithfulness(
         prompt_audit_path=validated_inputs.prompt_audit_path,
         prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
+        progress_label=f"{progress_label_prefix}-sufficiency" if progress_label_prefix else None,
+        progress_every=progress_every,
     )
     comprehensiveness_report = score_head(
         inputs=_with_ablation(validated_inputs.full_inputs, validated_inputs.selected_evidence_fields),
@@ -262,6 +268,8 @@ def evaluate_faithfulness(
         prompt_audit_path=validated_inputs.prompt_audit_path,
         prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
+        progress_label=f"{progress_label_prefix}-comprehensiveness" if progress_label_prefix else None,
+        progress_every=progress_every,
     )
     teacher_prob_ablation_report = score_head(
         inputs=_with_ablation(validated_inputs.full_inputs, validated_inputs.teacher_prob_ablation_fields),
@@ -272,6 +280,8 @@ def evaluate_faithfulness(
         prompt_audit_path=validated_inputs.prompt_audit_path,
         prompt_audit_hash=validated_inputs.prompt_audit_hash,
         accelerator=accelerator,
+        progress_label=f"{progress_label_prefix}-teacher-prob-ablation" if progress_label_prefix else None,
+        progress_every=progress_every,
     )
 
     _assert_path_equivalence(

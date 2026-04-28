@@ -48,8 +48,10 @@ def _parse_args(argv=None):
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--subset-size", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=768)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--progress-every", type=int, default=64)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--config-fingerprint", required=True)
@@ -105,7 +107,9 @@ def main(argv=None) -> int:
         tokenizer=bundle["tokenizer"],
         thinking_mode=ThinkingMode.NON_THINKING,
         max_new_tokens=int(args.max_new_tokens),
+        batch_size=int(args.batch_size),
         progress_label="formal-gen",
+        progress_every=args.progress_every,
     )
 
     print("[4/5] Running evaluate_gen_only...", flush=True)
@@ -154,6 +158,7 @@ def main(argv=None) -> int:
         "data_manifest_sha256": data_manifest_hash,
         "subset_size": len(records),
         "max_new_tokens": int(args.max_new_tokens),
+        "batch_size": int(args.batch_size),
         "prompt_audit_path": str(prompt_audit_path),
         "prompt_audit_hash": prompt_audit_hash,
         "evaluation_command": current_python_command(),

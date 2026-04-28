@@ -229,6 +229,7 @@ def run_formal_head_only_eval(
     calibration_bins: int = 10,
     apply_temperature_scaling: bool = False,
     accelerator: object | None = None,
+    scorer_progress_every: int | None = None,
 ) -> FormalHeadOnlyReport:
     """Run formal head-only evaluation through the shared scorer contract."""
 
@@ -251,6 +252,8 @@ def run_formal_head_only_eval(
         prompt_audit_path=prompt_audit_path,
         prompt_audit_hash=prompt_audit_hash,
         accelerator=accelerator,
+        progress_label="head-validation" if scorer_progress_every is not None else None,
+        progress_every=scorer_progress_every,
     )
     report_population = score_head(
         inputs=report_inputs,
@@ -261,6 +264,8 @@ def run_formal_head_only_eval(
         prompt_audit_path=prompt_audit_path,
         prompt_audit_hash=prompt_audit_hash,
         accelerator=accelerator,
+        progress_label=f"head-{report_inputs.population_name.value}" if scorer_progress_every is not None else None,
+        progress_every=scorer_progress_every,
     )
 
     _require_computable_population(

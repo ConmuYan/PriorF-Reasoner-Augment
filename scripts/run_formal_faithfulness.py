@@ -52,6 +52,7 @@ def _parse_args(argv=None):
     parser.add_argument("--subset-size", type=int, default=None)
     parser.add_argument("--gpu-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--progress-every", type=int, default=64)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--config-fingerprint", required=True)
@@ -144,6 +145,8 @@ def main(argv=None) -> int:
         cls_head=bundle["cls_head"],
         tokenizer=bundle["tokenizer"],
         accelerator=None,
+        progress_label_prefix="faithfulness",
+        progress_every=args.progress_every,
     )
 
     print("[5/5] Writing FaithfulnessReport JSON...", flush=True)
