@@ -407,10 +407,19 @@ def test_build_trainable_peft_model_uses_requested_path(monkeypatch: pytest.Monk
     import types
     import sys
 
+    # Mock peft.tuners.tuners_utils for PEFT UPCAST_DTYPES patch
+    fake_tuners_utils = types.SimpleNamespace(UPCAST_DTYPES=("torch.float32",))
+    fake_tuners = types.SimpleNamespace(tuners_utils=fake_tuners_utils)
+    monkeypatch.setitem(sys.modules, "peft.tuners", fake_tuners)
+    monkeypatch.setitem(sys.modules, "peft.tuners.tuners_utils", fake_tuners_utils)
     monkeypatch.setitem(
         sys.modules,
         "peft",
-        types.SimpleNamespace(get_peft_model=fake_get_peft_model, PeftModel=_FakePeftModel),
+        types.SimpleNamespace(
+            get_peft_model=fake_get_peft_model,
+            PeftModel=_FakePeftModel,
+            tuners=fake_tuners,
+        ),
     )
 
     base_model = object()

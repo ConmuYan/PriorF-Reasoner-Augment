@@ -36,3 +36,15 @@ check/
 task/
 todo.md
 .codex
+
+# Claude Code project config
+.claude/
+
+# deepinit auto-generated docs
+AGENTS.md
+**/AGENTS.md
+
+# Migration artifacts
+env_baseline.json
+migration_manifest.json
+*.tar.gz
