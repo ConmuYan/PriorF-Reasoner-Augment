@@ -527,6 +527,9 @@ def _build_trainable_peft_model(
         return get_peft_model(base_model, lora_cfg)
 
     from peft import PeftModel  # noqa: E402
+    from peft.tuners.tuners_utils import UPCAST_DTYPES as _orig_upcast  # noqa: E402
+    import peft.tuners.tuners_utils as _tu  # noqa: E402
+    _tu.UPCAST_DTYPES = tuple(n for n in _orig_upcast if hasattr(torch, n))
 
     return PeftModel.from_pretrained(
         base_model,

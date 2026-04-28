@@ -77,7 +77,13 @@ def _load_generation_model(*, qwen_path: Path, peft_adapter: Path, gpu_index: in
     torch_dtype = torch.bfloat16 if device_str != "cpu" else torch.float32
 
     from peft import PeftModel
+    from peft.tuners.tuners_utils import UPCAST_DTYPES as _orig_upcast
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # Patch UPCAST_DTYPES to remove dtypes unsupported by this PyTorch version
+    import peft.tuners.tuners_utils as _tu
+    _safe_upcast = tuple(n for n in _orig_upcast if hasattr(torch, n))
+    _tu.UPCAST_DTYPES = _safe_upcast
 
     tokenizer = AutoTokenizer.from_pretrained(str(qwen_path))
     base_model = AutoModelForCausalLM.from_pretrained(

@@ -137,6 +137,9 @@ def main(argv=None) -> int:
 
     print(f"[4/6] Loading PEFT adapter: {args.peft_adapter}", flush=True)
     from peft import PeftModel  # noqa: E402
+    from peft.tuners.tuners_utils import UPCAST_DTYPES as _orig_upcast  # noqa: E402
+    import peft.tuners.tuners_utils as _tu  # noqa: E402
+    _tu.UPCAST_DTYPES = tuple(n for n in _orig_upcast if hasattr(torch, n))
 
     model = PeftModel.from_pretrained(base_model, str(args.peft_adapter))
     model.to(device_str)

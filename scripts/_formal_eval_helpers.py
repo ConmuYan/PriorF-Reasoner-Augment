@@ -211,6 +211,9 @@ def load_model_bundle(
     )
 
     from peft import PeftModel
+    from peft.tuners.tuners_utils import UPCAST_DTYPES as _orig_upcast
+    import peft.tuners.tuners_utils as _tu
+    _tu.UPCAST_DTYPES = tuple(n for n in _orig_upcast if hasattr(torch, n))
 
     model = PeftModel.from_pretrained(base_model, str(peft_adapter))
     model.to(device_str)
