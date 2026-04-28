@@ -156,6 +156,20 @@ def test_stage1_adapter_artifact_helpers_roundtrip(tmp_path: Path) -> None:
     ).read_bytes()
 
 
+def test_stage1_peft_upcast_dtype_patch_removes_unsupported_torch_dtypes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import peft.tuners.tuners_utils as tuners_utils
+
+    monkeypatch.setattr(
+        tuners_utils,
+        "UPCAST_DTYPES",
+        ("float32", "float8_e8m0fnu", "bfloat16"),
+    )
+
+    stage1_sft._patch_peft_upcast_dtypes_for_torch()
+
+    assert tuners_utils.UPCAST_DTYPES == ("float32", "bfloat16")
+
+
 def test_resolve_total_steps_uses_max_steps_or_epochs() -> None:
     assert stage1_sft._resolve_total_steps(
         SimpleNamespace(max_steps=11, num_epochs=None, batch_size=4),

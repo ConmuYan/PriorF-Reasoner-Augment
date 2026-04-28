@@ -212,6 +212,15 @@ def _copy_adapter_artifacts(*, source_checkpoint_dir: Path, destination_dir: Pat
     shutil.copytree(source_adapter_dir, destination_adapter_dir)
 
 
+def _patch_peft_upcast_dtypes_for_torch() -> None:
+    """Remove PEFT adapter upcast dtypes unsupported by the installed Torch."""
+
+    from peft.tuners.tuners_utils import UPCAST_DTYPES as _orig_upcast
+    import peft.tuners.tuners_utils as _tu
+
+    _tu.UPCAST_DTYPES = tuple(name for name in _orig_upcast if hasattr(torch, name))
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -292,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     print("[3/6] Wrapping backbone with PEFT LoRA...", flush=True)
     from peft import LoraConfig, get_peft_model
 
+    _patch_peft_upcast_dtypes_for_torch()
     lora_cfg = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
