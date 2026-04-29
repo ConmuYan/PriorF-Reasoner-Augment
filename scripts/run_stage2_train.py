@@ -59,7 +59,7 @@ from evidence.output_schema import PredLabel  # noqa: E402
 from evidence.prompt_audit import audit_prompt_bundle  # noqa: E402
 from evidence.prompt_builder import PromptMode, ThinkingMode, build_prompt  # noqa: E402
 from graph_data.manifests import PopulationMetadata, load_data_manifest  # noqa: E402
-from priorf_teacher.export_pipeline import read_teacher_export_artifact  # noqa: E402
+from priorf_teacher.export_pipeline import read_teacher_export_artifact, read_teacher_export_manifest  # noqa: E402
 from priorf_teacher.schema import (  # noqa: E402
     DatasetName,
     GraphRegime,
@@ -166,6 +166,46 @@ def _teacher_checkpoint_sha256(records: tuple[TeacherExportRecord, ...]) -> str 
     if path.is_dir():
         return _directory_sha256(path)
     return None
+
+
+def _teacher_export_namespace_from_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    parts = Path(path).parts
+    for index in range(0, len(parts) - 2):
+        if parts[index : index + 2] == ("outputs", "gated"):
+            return parts[index + 2]
+    return None
+
+
+def _teacher_export_manifest_path_for_artifact(path: Path) -> Path:
+    return Path(path).with_name("teacher_export_manifest.json")
+
+
+def _teacher_export_manifest_provenance(path: Path | None, *, prefix: str) -> dict[str, Any]:
+    if path is None:
+        return {
+            f"{prefix}_namespace": None,
+            f"{prefix}_manifest_path": None,
+            f"{prefix}_manifest_sha256": None,
+            f"{prefix}_random_seed": None,
+            f"{prefix}_checkpoint_path": None,
+            f"{prefix}_checkpoint_sha256": None,
+            f"{prefix}_node_ids_hash": None,
+            f"{prefix}_row_count": None,
+        }
+    manifest_path = _teacher_export_manifest_path_for_artifact(path)
+    manifest = read_teacher_export_manifest(manifest_path)
+    return {
+        f"{prefix}_namespace": _teacher_export_namespace_from_path(path),
+        f"{prefix}_manifest_path": str(manifest_path),
+        f"{prefix}_manifest_sha256": _file_sha256(manifest_path),
+        f"{prefix}_random_seed": int(manifest.provenance.random_seed),
+        f"{prefix}_checkpoint_path": manifest.provenance.teacher_checkpoint_path,
+        f"{prefix}_checkpoint_sha256": manifest.provenance.teacher_checkpoint_sha256,
+        f"{prefix}_node_ids_hash": manifest.node_ids_hash,
+        f"{prefix}_row_count": int(manifest.row_count),
+    }
 
 
 def _canonical_json_bytes(payload: object) -> bytes:
@@ -1117,6 +1157,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         "best_checkpoint_metric_value": best_checkpoint_metric_value,
         "config_fingerprint_sha256": _config_fingerprint(
             {k: v for k, v in vars(args).items() if not isinstance(v, Path)}
+        ),
+        "teacher_export_namespace": _teacher_export_namespace_from_path(args.teacher_export_train),
+        **_teacher_export_manifest_provenance(
+            args.teacher_export_train,
+            prefix="teacher_export_train",
+        ),
+        **_teacher_export_manifest_provenance(
+            args.teacher_export_validation,
+            prefix="teacher_export_validation",
         ),
         **provenance_fields,
         **leakage_fields,

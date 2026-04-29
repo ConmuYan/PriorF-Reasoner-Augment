@@ -4,6 +4,7 @@ import os
 import random
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -16,7 +17,16 @@ from eval.head_scoring import CheckpointProvenance, ScorerReport
 from evidence.prompt_builder import ThinkingMode
 from evidence.leakage_policy import formal_leakage_provenance_fields
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
-from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
+from priorf_teacher.schema import (
+    DatasetName,
+    GraphRegime,
+    NeighborSummary,
+    PopulationName,
+    RelationProfile,
+    TeacherExportManifest,
+    TeacherExportRecord,
+    TeacherProvenance,
+)
 from scripts import run_formal_head_only_eval as formal_head_only_driver
 from scripts import run_stage2_train as stage2_train_driver
 
@@ -218,6 +228,61 @@ def test_prompt_audit_artifact_hash_is_recorded(tmp_path: Path) -> None:
     assert payload["violation_count"] == 0
     assert payload["sample_counts"]["train"]["samples"] == 1
     assert "labeled_neighbors" in payload["forbidden_fields"]
+
+
+def test_teacher_export_namespace_is_recorded_from_seed42_path() -> None:
+    path = Path(
+        "outputs/gated/teacher_exports_seed42_benchmark/amazon/validation/teacher_export.parquet"
+    )
+
+    assert stage2_train_driver._teacher_export_namespace_from_path(path) == "teacher_exports_seed42_benchmark"
+    assert stage2_train_driver._teacher_export_namespace_from_path(None) is None
+
+
+def test_teacher_export_manifest_provenance_records_seed42_fields(tmp_path: Path) -> None:
+    export_path = (
+        tmp_path
+        / "outputs"
+        / "gated"
+        / "teacher_exports_seed42_benchmark"
+        / "amazon"
+        / "validation"
+        / "teacher_export.parquet"
+    )
+    export_path.parent.mkdir(parents=True)
+    manifest_path = export_path.with_name("teacher_export_manifest.json")
+    manifest = TeacherExportManifest(
+        dataset_name=DatasetName.AMAZON,
+        population_name=PopulationName.VALIDATION,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        row_count=17,
+        node_ids_hash="d" * 64,
+        split_values=(PopulationName.VALIDATION.value,),
+        contains_tuning_rows=True,
+        contains_final_test_rows=False,
+        provenance=TeacherProvenance(
+            code_git_sha="1" * 40,
+            teacher_checkpoint_path="/models/priorf/seed_42/best_model.pt",
+            teacher_checkpoint_sha256="e" * 64,
+            data_manifest_path="manifests/amazon/data_manifest.json",
+            data_manifest_sha256="f" * 64,
+            export_timestamp_utc=datetime(2026, 4, 29, tzinfo=timezone.utc),
+            random_seed=42,
+            graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        ),
+    )
+    manifest_path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+    fields = stage2_train_driver._teacher_export_manifest_provenance(export_path, prefix="teacher_export_validation")
+
+    assert fields["teacher_export_validation_namespace"] == "teacher_exports_seed42_benchmark"
+    assert fields["teacher_export_validation_manifest_path"] == str(manifest_path)
+    assert fields["teacher_export_validation_manifest_sha256"] == stage2_train_driver._file_sha256(manifest_path)
+    assert fields["teacher_export_validation_random_seed"] == 42
+    assert fields["teacher_export_validation_checkpoint_path"] == "/models/priorf/seed_42/best_model.pt"
+    assert fields["teacher_export_validation_checkpoint_sha256"] == "e" * 64
+    assert fields["teacher_export_validation_node_ids_hash"] == "d" * 64
+    assert fields["teacher_export_validation_row_count"] == 17
 
 
 def test_training_sample_sft_score_does_not_copy_teacher_probability() -> None:
