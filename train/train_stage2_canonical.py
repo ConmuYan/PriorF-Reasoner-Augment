@@ -301,6 +301,9 @@ def run_canonical_train_step(
     tokenizer: Any,
     optimizer: torch.optim.Optimizer,
     accelerator: Accelerator | None = None,
+    zero_grad: bool = True,
+    optimizer_step: bool = True,
+    loss_scale: float = 1.0,
 ) -> CanonicalStepReport:
     """Run exactly one canonical joint-training optimizer step.
 
@@ -315,7 +318,10 @@ def run_canonical_train_step(
 
     model.train()
     cls_head.train(True)
-    optimizer.zero_grad(set_to_none=True)
+    if loss_scale <= 0.0:
+        raise ValueError("loss_scale must be > 0.0")
+    if zero_grad:
+        optimizer.zero_grad(set_to_none=True)
 
     device = _model_device(model)
     gen_losses: list[torch.Tensor] = []
@@ -361,10 +367,11 @@ def run_canonical_train_step(
     _require_finite_tensor(distillation_loss, "distillation_loss")
     _require_finite_tensor(total_loss, "total_loss")
 
-    accelerator.backward(total_loss)
-    if config.max_grad_norm is not None:
-        accelerator.clip_grad_norm_(list(model.parameters()) + list(_module_parameters(cls_head)), config.max_grad_norm)
-    optimizer.step()
+    accelerator.backward(total_loss * float(loss_scale))
+    if optimizer_step:
+        if config.max_grad_norm is not None:
+            accelerator.clip_grad_norm_(list(model.parameters()) + list(_module_parameters(cls_head)), config.max_grad_norm)
+        optimizer.step()
 
     return CanonicalStepReport(
         n_samples=len(batch.samples),

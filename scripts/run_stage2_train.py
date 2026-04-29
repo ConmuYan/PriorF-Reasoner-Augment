@@ -425,11 +425,61 @@ def _config_fingerprint(payload: dict[str, Any]) -> str:
 
 
 def _validate_unsupported_driver_args(args: argparse.Namespace) -> None:
-    if int(args.gradient_accumulation_steps) != 1:
-        raise ValueError(
-            "run_stage2_train.py currently supports only --gradient-accumulation-steps 1; "
-            "refusing to silently ignore gradient accumulation"
-        )
+    if int(args.batch_size) < 2:
+        raise ValueError("stratified Stage-2 training requires --batch-size >= 2")
+    if int(args.gradient_accumulation_steps) < 1:
+        raise ValueError("--gradient-accumulation-steps must be >= 1")
+    if int(args.early_stopping_patience) < 0:
+        raise ValueError("--early-stopping-patience must be >= 0")
+    if float(args.early_stopping_min_delta) < 0.0:
+        raise ValueError("--early-stopping-min-delta must be >= 0.0")
+    if int(args.min_steps_before_early_stop) < 0:
+        raise ValueError("--min-steps-before-early-stop must be >= 0")
+    if int(args.early_stopping_patience) > 0:
+        if args.teacher_export_validation is None:
+            raise ValueError("early stopping requires --teacher-export-validation")
+        if int(args.validation_every_n_steps) <= 0:
+            raise ValueError("early stopping requires --validation-every-n-steps > 0")
+
+
+def _optimizer_steps_per_epoch(*, n_train: int, batch_size: int, gradient_accumulation_steps: int) -> int:
+    if n_train < 1:
+        raise ValueError("n_train must be >= 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    if gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1")
+    micro_batches = max(1, math.ceil(float(n_train) / float(batch_size)))
+    return max(1, math.ceil(float(micro_batches) / float(gradient_accumulation_steps)))
+
+
+def _aggregate_step_reports(reports: tuple[CanonicalStepReport, ...]) -> CanonicalStepReport:
+    if not reports:
+        raise ValueError("reports must not be empty")
+    n_samples = sum(int(report.n_samples) for report in reports)
+    if n_samples < 1:
+        raise ValueError("aggregated report must contain at least one sample")
+
+    first = reports[0]
+
+    def weighted(field_name: str) -> float:
+        return sum(float(getattr(report, field_name)) * float(report.n_samples) for report in reports) / float(n_samples)
+
+    return CanonicalStepReport(
+        n_samples=n_samples,
+        generation_loss=weighted("generation_loss"),
+        classification_loss=weighted("classification_loss"),
+        distillation_loss=weighted("distillation_loss"),
+        total_loss=weighted("total_loss"),
+        lambda_cls=float(first.lambda_cls),
+        lambda_distill=float(first.lambda_distill),
+        generation_prompt_mode=first.generation_prompt_mode,
+        classification_prompt_mode=first.classification_prompt_mode,
+        distillation_target=first.distillation_target,
+        thinking_mode=first.thinking_mode,
+        graph_regime=first.graph_regime,
+        used_accelerate_backward=all(bool(report.used_accelerate_backward) for report in reports),
+    )
 
 
 def _resolve_shared_graph_regime(
@@ -598,6 +648,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Explicit optimizer steps. Overrides --num-epochs when both set.")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--early-stopping-patience", type=int, default=0,
+                        help="Number of validation checks without improvement before stopping. "
+                             "0 disables early stopping. Counts validation checks, not train steps.")
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0,
+                        help="Minimum validation-metric improvement required to reset patience.")
+    parser.add_argument("--min-steps-before-early-stop", type=int, default=0,
+                        help="Do not stop early before this many optimizer steps have completed.")
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--lambda-cls", type=float, default=1.0)
     parser.add_argument("--lambda-distill", type=float, default=0.5)
@@ -672,7 +729,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
 
     if args.max_steps is None and args.num_epochs is None:
         raise ValueError("one of --max-steps / --num-epochs must be provided")
-    iters_per_epoch = max(1, (len(train_samples) + args.batch_size - 1) // args.batch_size)
+    grad_accum_steps = int(args.gradient_accumulation_steps)
+    micro_batches_per_epoch = max(1, math.ceil(float(len(train_samples)) / float(args.batch_size)))
+    iters_per_epoch = _optimizer_steps_per_epoch(
+        n_train=len(train_samples),
+        batch_size=int(args.batch_size),
+        gradient_accumulation_steps=grad_accum_steps,
+    )
     if args.max_steps is not None:
         total_steps = int(args.max_steps)
     else:
@@ -681,15 +744,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         raise ValueError(f"total_steps must be >= 1; got {total_steps}")
     warmup_steps = max(1, int(round(total_steps * max(0.0, args.warmup_ratio))))
     print(
-        f"       iters_per_epoch={iters_per_epoch}  total_steps={total_steps}  "
+        f"       micro_batches_per_epoch={micro_batches_per_epoch}  "
+        f"optimizer_steps_per_epoch={iters_per_epoch}  total_steps={total_steps}  "
         f"warmup_steps={warmup_steps}  lr_scheduler={args.lr_scheduler}",
         flush=True,
     )
     print(
         f"       graph_regime={shared_graph_regime.value} positives={train_positive_count} "
-        f"negatives={train_negative_count} batch_size={int(args.batch_size)}",
+        f"negatives={train_negative_count} micro_batch_size={int(args.batch_size)} "
+        f"gradient_accumulation_steps={grad_accum_steps} "
+        f"effective_batch_size={int(args.batch_size) * grad_accum_steps}",
         flush=True,
     )
+    if args.early_stopping_patience > 0:
+        print(
+            f"       early_stopping patience={int(args.early_stopping_patience)} "
+            f"min_delta={float(args.early_stopping_min_delta):.6g} "
+            f"min_steps={int(args.min_steps_before_early_stop)} "
+            f"metric={args.best_checkpoint_metric}",
+            flush=True,
+        )
 
     # Pre-select a stratified validation subset used for periodic monitoring.
     val_records_full: tuple[TeacherExportRecord, ...] = ()
@@ -814,9 +888,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     )
 
     print(
-        f"[5/7] Running {total_steps} canonical training steps "
+        f"[5/7] Running up to {total_steps} canonical optimizer steps "
         f"(epochs ~= {total_steps // iters_per_epoch if iters_per_epoch else 0}, "
-        f"warmup={warmup_steps})...",
+        f"warmup={warmup_steps}, effective_batch={int(args.batch_size) * grad_accum_steps})...",
         flush=True,
     )
     from accelerate import Accelerator  # noqa: E402
@@ -859,34 +933,52 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     ]
     positive_pool: list[int] = []
     negative_pool: list[int] = []
+    completed_steps = 0
+    micro_batches_seen = 0
+    early_stopping_enabled = int(args.early_stopping_patience) > 0
+    early_stopping_patience_counter = 0
+    early_stop_triggered = False
+    early_stop_step: int | None = None
+    early_stop_reason: str | None = None
     for step in range(total_steps):
-        batch_indices = _next_stratified_batch_indices(
-            positive_indices=positive_indices,
-            negative_indices=negative_indices,
-            positive_pool=positive_pool,
-            negative_pool=negative_pool,
-            batch_size=int(args.batch_size),
-            rng=rng,
-        )
-        batch_samples = tuple(train_samples[i] for i in batch_indices)
-        batch = CanonicalTrainingBatch(samples=batch_samples)
-        step_report = run_canonical_train_step(
-            config=config,
-            batch=batch,
-            model=model,
-            cls_head=cls_head,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            accelerator=accelerator,
-        )
+        micro_reports: list[CanonicalStepReport] = []
+        optimizer_step_samples = 0
+        for micro_idx in range(grad_accum_steps):
+            batch_indices = _next_stratified_batch_indices(
+                positive_indices=positive_indices,
+                negative_indices=negative_indices,
+                positive_pool=positive_pool,
+                negative_pool=negative_pool,
+                batch_size=int(args.batch_size),
+                rng=rng,
+            )
+            batch_samples = tuple(train_samples[i] for i in batch_indices)
+            batch = CanonicalTrainingBatch(samples=batch_samples)
+            micro_report = run_canonical_train_step(
+                config=config,
+                batch=batch,
+                model=model,
+                cls_head=cls_head,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                accelerator=accelerator,
+                zero_grad=(micro_idx == 0),
+                optimizer_step=(micro_idx == grad_accum_steps - 1),
+                loss_scale=1.0 / float(grad_accum_steps),
+            )
+            micro_reports.append(micro_report)
+            optimizer_step_samples += len(batch_samples)
+            micro_batches_seen += 1
+        step_report = _aggregate_step_reports(tuple(micro_reports))
         # Advance LR scheduler AFTER the optimizer step so the newly set
         # learning rate applies to the NEXT step.  This preserves standard
         # PyTorch warmup behaviour (step 0 sees near-zero LR during warmup).
         scheduler.step()
         last_step_report = step_report
         current_lr = float(scheduler.get_last_lr()[0])
-        samples_seen += len(batch_samples)
+        samples_seen += optimizer_step_samples
         steps_completed = step + 1
+        completed_steps = steps_completed
         elapsed_seconds = time.perf_counter() - train_started_at
         steps_per_second = float(steps_completed) / elapsed_seconds if elapsed_seconds > 0.0 else float("inf")
         eta_seconds = (
@@ -903,6 +995,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             "L_distill": step_report.distillation_loss,
             "total": step_report.total_loss,
             "samples_seen": samples_seen,
+            "optimizer_step_samples": optimizer_step_samples,
+            "micro_batches_seen": micro_batches_seen,
+            "gradient_accumulation_steps": grad_accum_steps,
             "elapsed_seconds": elapsed_seconds,
             "eta_seconds": eta_seconds,
         }
@@ -922,6 +1017,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 "total": step_report.total_loss,
                 "steps_per_sec": steps_per_second,
                 "samples_seen": samples_seen,
+                "optimizer_step_samples": optimizer_step_samples,
+                "micro_batches_seen": micro_batches_seen,
                 f"L_gen_sma{smoothing_window}": sma_L_gen.value,
                 f"L_cls_sma{smoothing_window}": sma_L_cls.value,
                 f"L_distill_sma{smoothing_window}": sma_L_distill.value,
@@ -988,10 +1085,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 "validation_brier": monitor_report.brier_score,
                 "validation_prob_std": monitor_report.prob_std,
                 "validation_elapsed_seconds": validation_elapsed_seconds,
+                "early_stopping_patience_counter": early_stopping_patience_counter,
             }) + "\n")
             train_log_f.flush()
             metric_value = _best_checkpoint_metric_value(monitor_report, args.best_checkpoint_metric)
-            if best_checkpoint_metric_value is None or metric_value > best_checkpoint_metric_value:
+            improved = (
+                best_checkpoint_metric_value is None
+                or metric_value > best_checkpoint_metric_value + float(args.early_stopping_min_delta)
+            )
+            if improved:
                 best_checkpoint_provenance = _persist_checkpoint_artifacts(
                     checkpoint_dir=output_dir / _BEST_CHECKPOINT_SUBDIR,
                     model=model,
@@ -1005,12 +1107,39 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 best_checkpoint_metric_value = metric_value
                 best_checkpoint_step = step + 1
                 best_checkpoint_step_report = step_report
+                early_stopping_patience_counter = 0
                 print(
                     f"       [best@{step + 1}]  {args.best_checkpoint_metric}={metric_value:.6f}",
                     flush=True,
                 )
+            elif early_stopping_enabled and steps_completed >= int(args.min_steps_before_early_stop):
+                early_stopping_patience_counter += 1
+                print(
+                    f"       [early-stop] no improvement for "
+                    f"{early_stopping_patience_counter}/{int(args.early_stopping_patience)} "
+                    f"validation checks "
+                    f"(best {args.best_checkpoint_metric}={best_checkpoint_metric_value})",
+                    flush=True,
+                )
+                if early_stopping_patience_counter >= int(args.early_stopping_patience):
+                    early_stop_triggered = True
+                    early_stop_step = step + 1
+                    early_stop_reason = (
+                        f"{args.best_checkpoint_metric} did not improve by "
+                        f"{float(args.early_stopping_min_delta):.6g} for "
+                        f"{int(args.early_stopping_patience)} validation checks"
+                    )
+                    model.train()
+                    cls_head.train(True)
+                    break
             model.train()
             cls_head.train(True)
+        if early_stop_triggered:
+            print(
+                f"       EARLY STOP at step {early_stop_step}: {early_stop_reason}",
+                flush=True,
+            )
+            break
     train_log_f.close()
     tb_logger.flush()
     assert last_step_report is not None
@@ -1021,7 +1150,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         checkpoint_dir=final_checkpoint_dir,
         model=model,
         cls_head=cls_head,
-        checkpoint_step=total_steps,
+        checkpoint_step=completed_steps,
     )
     _copy_checkpoint_artifacts(
         source_checkpoint_dir=final_checkpoint_dir,
@@ -1108,7 +1237,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 "prob_std": validation_report.prob_std,
                 "n_total": validation_report.n_total,
             },
-            total_steps,
+            completed_steps,
         )
     else:
         print("[7/7] Skipping post-training validation (no --teacher-export-validation)", flush=True)
@@ -1145,6 +1274,24 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         "trainable_params": trainable_params,
         "total_params": total_params,
         "total_steps": total_steps,
+        "planned_optimizer_steps": total_steps,
+        "completed_optimizer_steps": completed_steps,
+        "micro_batch_size": int(args.batch_size),
+        "gradient_accumulation_steps": grad_accum_steps,
+        "effective_batch_size": int(args.batch_size) * grad_accum_steps,
+        "micro_batches_per_epoch": micro_batches_per_epoch,
+        "optimizer_steps_per_epoch": iters_per_epoch,
+        "training_unit": "optimizer_steps" if args.max_steps is not None else "epochs",
+        "num_epochs_requested": args.num_epochs,
+        "max_steps_requested": args.max_steps,
+        "early_stopping_enabled": early_stopping_enabled,
+        "early_stopping_patience": int(args.early_stopping_patience),
+        "early_stopping_min_delta": float(args.early_stopping_min_delta),
+        "min_steps_before_early_stop": int(args.min_steps_before_early_stop),
+        "early_stop_triggered": early_stop_triggered,
+        "early_stop_step": early_stop_step,
+        "early_stop_reason": early_stop_reason,
+        "early_stopping_patience_counter": early_stopping_patience_counter,
         "checkpoint_source": "final_checkpoint",
         "checkpoint_dir": str(final_checkpoint_dir.resolve()),
         "best_checkpoint_dir": (

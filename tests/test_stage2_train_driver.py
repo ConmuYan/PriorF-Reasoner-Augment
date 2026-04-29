@@ -449,11 +449,88 @@ def test_rolling_mean_window_must_be_positive() -> None:
         stage2_train_driver._RollingMean(window=0)
 
 
-def test_stage2_driver_rejects_unsupported_gradient_accumulation() -> None:
-    args = SimpleNamespace(gradient_accumulation_steps=2)
+def test_optimizer_steps_per_epoch_counts_effective_batch() -> None:
+    assert stage2_train_driver._optimizer_steps_per_epoch(
+        n_train=100,
+        batch_size=2,
+        gradient_accumulation_steps=1,
+    ) == 50
+    assert stage2_train_driver._optimizer_steps_per_epoch(
+        n_train=100,
+        batch_size=2,
+        gradient_accumulation_steps=4,
+    ) == 13
 
-    with pytest.raises(ValueError, match="gradient-accumulation-steps 1"):
-        stage2_train_driver._validate_unsupported_driver_args(args)
+
+def test_aggregate_step_reports_weights_by_samples() -> None:
+    report_a = stage2_train_driver.CanonicalStepReport(
+        n_samples=2,
+        generation_loss=1.0,
+        classification_loss=2.0,
+        distillation_loss=3.0,
+        total_loss=1.0 + 2.0 * 2.0 + 3.0 * 3.0,
+        lambda_cls=2.0,
+        lambda_distill=3.0,
+        generation_prompt_mode="train",
+        classification_prompt_mode="eval_head",
+        distillation_target="clipped_teacher_prob_bce",
+        thinking_mode=ThinkingMode.NON_THINKING,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        used_accelerate_backward=True,
+    )
+    report_b = stage2_train_driver.CanonicalStepReport(
+        n_samples=6,
+        generation_loss=3.0,
+        classification_loss=4.0,
+        distillation_loss=5.0,
+        total_loss=3.0 + 2.0 * 4.0 + 3.0 * 5.0,
+        lambda_cls=2.0,
+        lambda_distill=3.0,
+        generation_prompt_mode="train",
+        classification_prompt_mode="eval_head",
+        distillation_target="clipped_teacher_prob_bce",
+        thinking_mode=ThinkingMode.NON_THINKING,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        used_accelerate_backward=True,
+    )
+
+    combined = stage2_train_driver._aggregate_step_reports((report_a, report_b))
+
+    assert combined.n_samples == 8
+    assert combined.generation_loss == pytest.approx(2.5)
+    assert combined.classification_loss == pytest.approx(3.5)
+    assert combined.distillation_loss == pytest.approx(4.5)
+    assert combined.total_loss == pytest.approx(2.5 + 2.0 * 3.5 + 3.0 * 4.5)
+
+
+def test_stage2_driver_accepts_gradient_accumulation_and_validates_early_stopping() -> None:
+    ok_args = SimpleNamespace(
+        batch_size=2,
+        gradient_accumulation_steps=4,
+        early_stopping_patience=0,
+        early_stopping_min_delta=0.0,
+        min_steps_before_early_stop=0,
+        teacher_export_validation=None,
+        validation_every_n_steps=0,
+    )
+    stage2_train_driver._validate_unsupported_driver_args(ok_args)
+
+    bad_args = SimpleNamespace(
+        batch_size=2,
+        gradient_accumulation_steps=4,
+        early_stopping_patience=3,
+        early_stopping_min_delta=0.0,
+        min_steps_before_early_stop=0,
+        teacher_export_validation=None,
+        validation_every_n_steps=100,
+    )
+    with pytest.raises(ValueError, match="early stopping requires --teacher-export-validation"):
+        stage2_train_driver._validate_unsupported_driver_args(bad_args)
+
+    bad_args.teacher_export_validation = Path("outputs/gated/teacher_exports/amazon/validation/teacher_export.parquet")
+    bad_args.validation_every_n_steps = 0
+    with pytest.raises(ValueError, match="early stopping requires --validation-every-n-steps"):
+        stage2_train_driver._validate_unsupported_driver_args(bad_args)
 
 
 def test_build_trainable_peft_model_uses_requested_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

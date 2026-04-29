@@ -319,6 +319,67 @@ def test_canonical_train_step_uses_three_losses_and_prompt_only_cls_path():
     assert cls_last_token_values == pytest.approx([1003.0, 1005.0], abs=1e-4)
 
 
+def test_canonical_train_step_supports_explicit_gradient_accumulation_controls():
+    cfg = _config(gradient_accumulation_steps=2)
+    batch = CanonicalTrainingBatch(samples=(_sample(3, 1, 1.0), _sample(5, 0, 0.0)))
+    tokenizer = TraceTokenizer()
+    model = TinyJointModel()
+    cls_head = TinyClsHead()
+    optimizer = torch.optim.SGD(list(model.parameters()) + list(cls_head.parameters()), lr=0.01)
+
+    before = model.weight.detach().clone()
+    first = run_canonical_train_step(
+        config=cfg,
+        batch=batch,
+        model=model,
+        cls_head=cls_head,
+        tokenizer=tokenizer,
+        optimizer=optimizer,
+        zero_grad=True,
+        optimizer_step=False,
+        loss_scale=0.5,
+    )
+
+    assert first.n_samples == 2
+    assert torch.equal(before, model.weight.detach())
+    assert model.weight.grad is not None
+
+    second = run_canonical_train_step(
+        config=cfg,
+        batch=batch,
+        model=model,
+        cls_head=cls_head,
+        tokenizer=tokenizer,
+        optimizer=optimizer,
+        zero_grad=False,
+        optimizer_step=True,
+        loss_scale=0.5,
+    )
+
+    assert second.n_samples == 2
+    assert not torch.equal(before, model.weight.detach())
+
+
+def test_canonical_train_step_rejects_nonpositive_loss_scale():
+    cfg = _config()
+    batch = CanonicalTrainingBatch(samples=(_sample(3, 1, 1.0),))
+    tokenizer = TraceTokenizer()
+    model = TinyJointModel()
+    cls_head = TinyClsHead()
+    optimizer = torch.optim.SGD(list(model.parameters()) + list(cls_head.parameters()), lr=0.01)
+
+    with pytest.raises(ValueError, match="loss_scale"):
+        run_canonical_train_step(
+            config=cfg,
+            batch=batch,
+            model=model,
+            cls_head=cls_head,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            loss_scale=0.0,
+        )
+
+
 def test_train_step_fail_closed_on_training_nan_and_frozen_probe():
     cfg = _config()
     batch = CanonicalTrainingBatch(samples=(_sample(3, 1, 0.5),))
