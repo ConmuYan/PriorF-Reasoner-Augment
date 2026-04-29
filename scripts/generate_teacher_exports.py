@@ -82,6 +82,19 @@ BRIDGE_FILES: tuple[str, ...] = (
 
 GRAPH_REGIME = GraphRegime.TRANSDUCTIVE_STANDARD
 GRAPH_REGIME_STR = "transductive_standard"
+_LGHGCL_V2_INIT_KEYS: tuple[str, ...] = (
+    "in_dim",
+    "mlp_hidden",
+    "gnn_hidden",
+    "out_hidden",
+    "num_relations",
+    "dropout",
+    "use_asda",
+    "use_mlp_branch",
+    "use_gnn_branch",
+    "asda_tau",
+    "proj_dim",
+)
 
 
 def _file_sha256(path: str | Path) -> str:
@@ -169,6 +182,20 @@ def _population_metadatas(
     return pops
 
 
+def _model_hyperparams_for_inference(summary: dict, canonical_mat_path: str | Path) -> dict:
+    """Extract only LGHGCLNetV2 constructor kwargs from a teacher summary."""
+
+    raw_model = dict(summary["config"]["model"])
+    if "in_dim" not in raw_model:
+        raw = loadmat(canonical_mat_path, squeeze_me=True)
+        features = raw["x"]
+        raw_model["in_dim"] = int(features.shape[1]) + 1
+    raw_model.setdefault("use_mlp_branch", True)
+    raw_model.setdefault("use_gnn_branch", True)
+    raw_model.setdefault("proj_dim", 64)
+    return {key: raw_model[key] for key in _LGHGCL_V2_INIT_KEYS if key in raw_model}
+
+
 def generate_for_dataset(
     dataset_key: str,
     base_output_dir: Path,
@@ -197,7 +224,7 @@ def generate_for_dataset(
     print(f"\n=== {dataset_key.upper()} ===")
 
     summary = json.loads(Path(cfg["model_summary"]).read_text())
-    model_hyperparams = summary["config"]["model"]
+    model_hyperparams = _model_hyperparams_for_inference(summary, cfg["canonical_mat"])
 
     # 1. Run inference → per-population records.
     print("  [1/5] Running teacher inference...")
