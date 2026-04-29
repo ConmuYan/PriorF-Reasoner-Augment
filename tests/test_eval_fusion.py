@@ -121,6 +121,8 @@ def test_formal_fusion_selects_alpha_on_validation_and_freezes_for_reporting():
     assert report.validation_split == PopulationName.VALIDATION
     assert report.report_split == PopulationName.FINAL_TEST
     assert report.selected_alpha == pytest.approx(report.selection.optimal_alpha)
+    assert "calibrated_gen_score" not in report.model_dump(mode="python")
+    assert "gen_score_calibration_artifact_path" not in report.model_dump(mode="python")
 
     old_payload = report.model_dump(mode="python")
     for field_name in (

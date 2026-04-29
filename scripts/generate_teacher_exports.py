@@ -174,6 +174,12 @@ def generate_for_dataset(
     base_output_dir: Path,
     device: str = "cuda",
     code_git_sha: str | None = None,
+    *,
+    checkpoint_override: Path | None = None,
+    model_summary_override: Path | None = None,
+    teacher_random_seed: int = 717,
+    teacher_export_namespace: str = "teacher_exports",
+    manifest_root: Path | None = None,
 ) -> None:
     if code_git_sha is None or len(code_git_sha) != 40:
         raise RuntimeError(
@@ -181,7 +187,13 @@ def generate_for_dataset(
             "from _git_head_sha_or_fail; zero-SHA placeholders are not "
             "permitted after Task 2 runtime-acceptance commit."
         )
-    cfg = DATASETS[dataset_key]
+    cfg = dict(DATASETS[dataset_key])
+    if checkpoint_override is not None:
+        cfg["checkpoint"] = str(checkpoint_override)
+    if model_summary_override is not None:
+        cfg["model_summary"] = str(model_summary_override)
+    if teacher_export_namespace not in {"teacher_exports", "teacher_exports_seed42_benchmark"}:
+        raise RuntimeError("teacher_export_namespace must be teacher_exports or teacher_exports_seed42_benchmark")
     print(f"\n=== {dataset_key.upper()} ===")
 
     summary = json.loads(Path(cfg["model_summary"]).read_text())
@@ -215,7 +227,7 @@ def generate_for_dataset(
             sha256=source_sha256,
         ),
     )
-    manifest_dir = base_output_dir / "manifests" / dataset_key
+    manifest_dir = (manifest_root or (base_output_dir / "manifests")) / dataset_key
     manifest_dir.mkdir(parents=True, exist_ok=True)
     data_manifest = build_data_manifest(
         data=canonical_data,
@@ -281,7 +293,7 @@ def generate_for_dataset(
             data_manifest_path=str(data_manifest_path),
             data_manifest_sha256=data_manifest_sha256,
             export_timestamp_utc=datetime.now(timezone.utc),
-            random_seed=717,
+            random_seed=int(teacher_random_seed),
             graph_regime=GRAPH_REGIME,
         )
         export_manifest = TeacherExportManifest(
@@ -297,7 +309,7 @@ def generate_for_dataset(
         )
         output_dir = (
             base_output_dir
-            / "outputs" / "gated" / "teacher_exports"
+            / "outputs" / "gated" / teacher_export_namespace
             / cfg["dataset_enum"].value
             / pop_enum.value
         )
@@ -318,6 +330,18 @@ def main() -> None:
     parser.add_argument("--dataset", choices=list(DATASETS.keys()) + ["all"], default="all")
     parser.add_argument("--output-dir", default=".")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--teacher-export-namespace",
+        choices=["teacher_exports", "teacher_exports_seed42_benchmark"],
+        default="teacher_exports",
+        help="Gated export namespace. Defaults to canonical seed717 teacher_exports.",
+    )
+    parser.add_argument("--teacher-random-seed", type=int, default=717)
+    parser.add_argument("--manifest-root", type=Path, default=None)
+    parser.add_argument("--amazon-checkpoint", type=Path, default=None)
+    parser.add_argument("--amazon-model-summary", type=Path, default=None)
+    parser.add_argument("--yelpchi-checkpoint", type=Path, default=None)
+    parser.add_argument("--yelpchi-model-summary", type=Path, default=None)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -329,8 +353,18 @@ def main() -> None:
 
     datasets = list(DATASETS.keys()) if args.dataset == "all" else [args.dataset]
     for ds in datasets:
+        checkpoint_override = getattr(args, f"{ds}_checkpoint")
+        model_summary_override = getattr(args, f"{ds}_model_summary")
         generate_for_dataset(
-            ds, output_dir, device=args.device, code_git_sha=code_git_sha
+            ds,
+            output_dir,
+            device=args.device,
+            code_git_sha=code_git_sha,
+            checkpoint_override=checkpoint_override,
+            model_summary_override=model_summary_override,
+            teacher_random_seed=int(args.teacher_random_seed),
+            teacher_export_namespace=args.teacher_export_namespace,
+            manifest_root=args.manifest_root,
         )
 
 

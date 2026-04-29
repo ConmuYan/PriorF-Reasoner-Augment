@@ -84,6 +84,15 @@ class GateManifest(BaseModel):
     teacher_prob_ablation_pass: bool
     population_contract_pass: bool
     leakage_audit_pass: bool
+    gen_score_calibration_schema_version: str | None = None
+    gen_score_calibration_source_population: Literal["validation"] | None = None
+    gen_score_calibration_artifact_path: StrictStr | None = None
+    gen_score_calibration_artifact_sha256: str | None = Field(default=None, pattern=HEX64_PATTERN)
+    raw_gen_score_retained: bool = True
+    calibrated_gen_score_present: bool = False
+    calibrated_gen_score_feature_set: tuple[str, ...] = ()
+    gen_score_not_used_in_fusion: Literal[True] = True
+    final_test_calibration_fit: Literal[False] = False
     leakage_policy_version: Literal["evidence_leakage_policy/v1"]
     neighbor_label_policy: Literal["removed_from_student_visible"]
     evidence_card_projection: Literal["student_safe_v1"]
@@ -123,6 +132,25 @@ class GateManifest(BaseModel):
             raise ValueError("formal_safe_result must be true")
         if self.provenance.generator_git_dirty:
             raise ValueError("generator_git_dirty must be false for clean gate manifests")
+        if self.raw_gen_score_retained is not True:
+            raise ValueError("raw_gen_score_retained must be true")
+        if self.gen_score_not_used_in_fusion is not True:
+            raise ValueError("gen_score_not_used_in_fusion must be true")
+        if self.final_test_calibration_fit is not False:
+            raise ValueError("final_test_calibration_fit must be false")
+        if self.calibrated_gen_score_present:
+            if self.gen_score_calibration_schema_version != "gen_score_calibration/v1":
+                raise ValueError("calibrated gen scores require gen_score_calibration_schema_version")
+            if self.gen_score_calibration_source_population != "validation":
+                raise ValueError("calibrated gen scores must be fit from validation")
+            if not self.gen_score_calibration_artifact_path:
+                raise ValueError("calibrated gen scores require artifact path")
+            if not self.gen_score_calibration_artifact_sha256:
+                raise ValueError("calibrated gen scores require artifact sha256")
+            if self.calibrated_gen_score_feature_set != ("raw_gen_score_bin",):
+                raise ValueError("unexpected calibrated_gen_score_feature_set")
+        elif self.gen_score_calibration_artifact_path or self.gen_score_calibration_artifact_sha256:
+            raise ValueError("calibration artifact provenance requires calibrated_gen_score_present=true")
         return self
 
 

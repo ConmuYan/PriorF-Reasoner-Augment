@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from sklearn import metrics
 
 from eval.eval_gen_only import GenOnlyEvalInputs, GenOnlyEvalSample, evaluate_gen_only
+from eval.gen_score_calibration import fit_bin_calibration, write_calibration_artifact
 from evidence.evidence_schema import build_evidence_card
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
@@ -188,8 +189,86 @@ def test_eval_gen_only_treats_score_as_fraud_probability_even_for_benign_label()
     report = evaluate_gen_only(inputs=inputs)
 
     assert report.probs == pytest.approx((0.05, 0.95))
+    assert report.raw_gen_score == pytest.approx((0.05, 0.95))
+    assert report.raw_gen_score_retained is True
+    assert report.calibrated_gen_score_present is False
+    assert report.calibrated_gen_score == ()
     assert report.auroc == pytest.approx(1.0)
     assert report.auprc == pytest.approx(1.0)
+
+
+def test_eval_gen_only_adds_calibrated_score_when_artifact_provided(tmp_path):
+    samples = (
+        _sample(
+            node_id=6,
+            ground_truth_label=0,
+            generated_text=(
+                '{"rationale":"strict ok","evidence":["teacher evidence"],'
+                '"pattern_hint":"pattern","label":"benign","score":0.05}'
+            ),
+        ),
+        _sample(
+            node_id=7,
+            ground_truth_label=1,
+            generated_text=(
+                '{"rationale":"strict ok","evidence":["teacher evidence"],'
+                '"pattern_hint":"pattern","label":"fraud","score":0.95}'
+            ),
+        ),
+    )
+    artifact = fit_bin_calibration(
+        dataset_name=DatasetName.AMAZON,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        source_population_name=PopulationName.VALIDATION,
+        labels=(0, 1),
+        raw_gen_scores=(0.05, 0.95),
+        node_ids=(6, 7),
+    )
+    artifact_path = tmp_path / "gen_score_calibration.json"
+    artifact_hash = write_calibration_artifact(artifact, artifact_path)
+
+    report = evaluate_gen_only(
+        inputs=GenOnlyEvalInputs(
+            samples=samples,
+            dataset_name=DatasetName.AMAZON,
+            population_name=PopulationName.VALIDATION,
+            graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+            gen_score_calibration_artifact_path=str(artifact_path),
+            gen_score_calibration_artifact_sha256=artifact_hash,
+            **_eval_audit_kwargs(),
+        )
+    )
+
+    assert report.probs == pytest.approx((0.05, 0.95))
+    assert report.raw_gen_score == pytest.approx((0.05, 0.95))
+    assert report.calibrated_gen_score == pytest.approx((1 / 3, 2 / 3))
+    assert report.calibrated_gen_score_present is True
+    assert report.gen_score_calibration_schema_version == "gen_score_calibration/v1"
+    assert report.gen_score_calibration_source_population == "validation"
+    assert report.gen_score_not_used_in_fusion is True
+    assert report.final_test_calibration_fit is False
+    assert report.calibrated_brier_score is not None
+
+
+def test_eval_gen_only_rejects_missing_calibration_artifact_pair():
+    with pytest.raises(ValidationError):
+        GenOnlyEvalInputs(
+            samples=(
+                _sample(
+                    node_id=6,
+                    ground_truth_label=0,
+                    generated_text=(
+                        '{"rationale":"strict ok","evidence":["teacher evidence"],'
+                        '"pattern_hint":"pattern","label":"benign","score":0.05}'
+                    ),
+                ),
+            ),
+            dataset_name=DatasetName.AMAZON,
+            population_name=PopulationName.VALIDATION,
+            graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+            gen_score_calibration_artifact_path="missing.json",
+            **_eval_audit_kwargs(),
+        )
 
 
 def test_eval_gen_only_single_class_population_leaves_auroc_and_auprc_none():

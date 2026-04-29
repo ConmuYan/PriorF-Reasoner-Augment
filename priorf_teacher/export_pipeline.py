@@ -29,7 +29,10 @@ from priorf_teacher.schema import (
 
 _ARTIFACT_NAME: Final[str] = "teacher_export.parquet"
 _MANIFEST_NAME: Final[str] = "teacher_export_manifest.json"
-_OUTPUT_PREFIX_PARTS: Final[tuple[str, str, str]] = ("outputs", "gated", "teacher_exports")
+_ALLOWED_OUTPUT_PREFIX_PARTS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("outputs", "gated", "teacher_exports"),
+    ("outputs", "gated", "teacher_exports_seed42_benchmark"),
+)
 _FORBIDDEN_OUTPUT_PARTS: Final[tuple[str, ...]] = ("assets", "formal", "diagnostic")
 
 
@@ -178,9 +181,9 @@ def _ensure_output_dir_allowed(output_dir: str | Path, dataset_name: DatasetName
     parts = output_path.parts
     if any(part in _FORBIDDEN_OUTPUT_PARTS for part in parts):
         raise ValueError("teacher export output_dir must not be under forbidden assets/formal/diagnostic paths")
-    required = (*_OUTPUT_PREFIX_PARTS, dataset_name.value, population_name.value)
-    if not _contains_contiguous_parts(parts, required):
-        expected = "/".join(required)
+    allowed = tuple((*prefix, dataset_name.value, population_name.value) for prefix in _ALLOWED_OUTPUT_PREFIX_PARTS)
+    if not any(_contains_contiguous_parts(parts, required) for required in allowed):
+        expected = " or ".join("/".join(required) for required in allowed)
         raise ValueError(f"teacher export output_dir must be under {expected}")
     return output_path
 

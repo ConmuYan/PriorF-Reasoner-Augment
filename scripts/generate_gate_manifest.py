@@ -131,6 +131,45 @@ def _derive_teacher_prob_ablation_pass(faith_report: dict, max_flip_rate: float)
     return float(flip_rate) <= max_flip_rate
 
 
+def _validate_gen_score_calibration_provenance(gen_report: dict) -> dict:
+    """Extract optional generation-score calibration provenance and fail closed."""
+
+    present = bool(gen_report.get("calibrated_gen_score_present", False))
+    payload = {
+        "gen_score_calibration_schema_version": gen_report.get("gen_score_calibration_schema_version"),
+        "gen_score_calibration_source_population": gen_report.get("gen_score_calibration_source_population"),
+        "gen_score_calibration_artifact_path": gen_report.get("gen_score_calibration_artifact_path"),
+        "gen_score_calibration_artifact_sha256": gen_report.get("gen_score_calibration_artifact_sha256"),
+        "raw_gen_score_retained": bool(gen_report.get("raw_gen_score_retained", True)),
+        "calibrated_gen_score_present": present,
+        "calibrated_gen_score_feature_set": tuple(gen_report.get("calibrated_gen_score_feature_set", ())),
+        "gen_score_not_used_in_fusion": bool(gen_report.get("gen_score_not_used_in_fusion", True)),
+        "final_test_calibration_fit": bool(gen_report.get("final_test_calibration_fit", False)),
+    }
+    if present:
+        artifact_path = payload["gen_score_calibration_artifact_path"]
+        artifact_hash = payload["gen_score_calibration_artifact_sha256"]
+        if not artifact_path or not artifact_hash:
+            raise ValueError("calibrated gen report must carry calibration artifact path/hash")
+        artifact = Path(str(artifact_path))
+        if not artifact.is_file():
+            raise ValueError(f"gen score calibration artifact does not exist: {artifact}")
+        actual_hash = file_sha256(artifact)
+        if actual_hash != artifact_hash:
+            raise ValueError(
+                f"gen score calibration artifact hash mismatch: report={artifact_hash} actual={actual_hash}"
+            )
+        if payload["gen_score_calibration_source_population"] != "validation":
+            raise ValueError("gen score calibration source population must be validation")
+        if payload["final_test_calibration_fit"] is not False:
+            raise ValueError("final_test_calibration_fit must be false")
+        if payload["gen_score_not_used_in_fusion"] is not True:
+            raise ValueError("gen_score_not_used_in_fusion must be true")
+        if payload["raw_gen_score_retained"] is not True:
+            raise ValueError("raw_gen_score_retained must be true")
+    return payload
+
+
 def _extract_dataset_and_regime(report: dict) -> tuple[str | None, str | None]:
     """Extract explicit top-level report identity only.
 
@@ -242,6 +281,7 @@ def main(argv=None) -> int:
         FusionEvalReport.model_validate(_strip_runtime_metadata(fusion_payload))
     if faith_payload:
         FaithfulnessReport.model_validate(_strip_runtime_metadata(faith_payload))
+    gen_score_calibration_provenance = _validate_gen_score_calibration_provenance(gen_payload)
 
     print("[5/6] Deriving pass/fail gates...", flush=True)
     subset_head_gate_pass = _derive_head_pass(head_payload, args.min_head_auroc) if head_payload else False
@@ -280,6 +320,7 @@ def main(argv=None) -> int:
         teacher_prob_ablation_pass=teacher_prob_ablation_pass,
         population_contract_pass=population_contract_pass,
         leakage_audit_pass=args.leakage_audit_pass,
+        **gen_score_calibration_provenance,
         leakage_policy_version=LEAKAGE_POLICY_VERSION,
         neighbor_label_policy=NEIGHBOR_LABEL_POLICY,
         evidence_card_projection=EVIDENCE_CARD_PROJECTION,

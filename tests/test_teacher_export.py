@@ -165,6 +165,10 @@ def _output_dir(tmp_path: Path) -> Path:
     return tmp_path / "outputs" / "gated" / "teacher_exports" / "amazon" / "validation"
 
 
+def _seed42_output_dir(tmp_path: Path) -> Path:
+    return tmp_path / "outputs" / "gated" / "teacher_exports_seed42_benchmark" / "amazon" / "validation"
+
+
 @pytest.mark.parametrize("bad_regime", ["test", "standard", ""])
 def test_unknown_graph_regime_rejected(bad_regime):
     payload = _record().model_dump(mode="json")
@@ -318,6 +322,23 @@ def test_export_pipeline_rejects_output_dir_outside_gated_teacher_exports(tmp_pa
             export_manifest=_export_manifest(data_manifest_path),
             records=[_record()],
         )
+
+
+def test_export_pipeline_accepts_seed42_benchmark_namespace(tmp_path):
+    data_manifest_path = _write_data_manifest(tmp_path)
+    report_path = _baseline_report(tmp_path, data_manifest_path)
+
+    artifact_path, manifest_path = write_teacher_export_artifact(
+        data_manifest_path=data_manifest_path,
+        teacher_baseline_report_path=report_path,
+        output_dir=_seed42_output_dir(tmp_path),
+        export_manifest=_export_manifest(data_manifest_path),
+        records=[_record()],
+    )
+
+    assert artifact_path.exists()
+    assert manifest_path.exists()
+    assert "teacher_exports_seed42_benchmark" in artifact_path.parts
 
 
 def test_export_pipeline_reread_row_count_mismatch_raises(tmp_path):

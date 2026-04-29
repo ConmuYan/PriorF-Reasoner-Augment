@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 import scripts.generate_gate_manifest as gate_generator
-from scripts.generate_gate_manifest import _check_population_contract, _derive_head_pass, _strip_runtime_metadata, _validate_raw_formal_report
+from scripts.generate_gate_manifest import (
+    _check_population_contract,
+    _derive_head_pass,
+    _strip_runtime_metadata,
+    _validate_gen_score_calibration_provenance,
+    _validate_raw_formal_report,
+)
 
 
 def test_derive_head_pass_reads_headline_metrics_auroc() -> None:
@@ -183,6 +189,22 @@ def test_gate_generator_raw_report_validation_accepts_top_level_identity(tmp_pat
         expected_dataset="amazon",
         expected_graph_regime="transductive_standard",
     )
+
+
+def test_gate_generator_requires_calibration_artifact_hash_when_calibrated_scores_used(tmp_path: Path) -> None:
+    payload = {
+        "calibrated_gen_score_present": True,
+        "gen_score_calibration_schema_version": "gen_score_calibration/v1",
+        "gen_score_calibration_source_population": "validation",
+        "gen_score_calibration_artifact_path": str(tmp_path / "missing.json"),
+        "raw_gen_score_retained": True,
+        "calibrated_gen_score_feature_set": ["raw_gen_score_bin"],
+        "gen_score_not_used_in_fusion": True,
+        "final_test_calibration_fit": False,
+    }
+
+    with pytest.raises(ValueError, match="path/hash"):
+        _validate_gen_score_calibration_provenance(payload)
 
 
 def test_synthetic_compliant_bundle_passes_generate_gate_manifest_and_gate_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

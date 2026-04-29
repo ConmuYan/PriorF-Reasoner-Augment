@@ -13,6 +13,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from eval.eval_gen_only import GenOnlyEvalInputs, GenOnlyEvalReport, GenOnlyEvalSample, evaluate_gen_only  # noqa: E402
+from eval.gen_score_calibration import (  # noqa: E402
+    fit_bin_calibration,
+    fit_oof_bin_calibration_metrics,
+    write_calibration_artifact,
+)
 from evidence.evidence_schema import build_student_evidence_card  # noqa: E402
 from evidence.prompt_builder import PromptMode, ThinkingMode  # noqa: E402
 from graph_data.manifests import load_data_manifest  # noqa: E402
@@ -63,6 +68,11 @@ def _parse_args(argv=None):
     parser.add_argument("--commit", required=True)
     parser.add_argument("--config-fingerprint", required=True)
     parser.add_argument("--step", type=int, default=0)
+    parser.add_argument("--fit-gen-score-calibration", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gen-score-calibration-output", type=Path, default=None)
+    parser.add_argument("--gen-score-calibration-artifact", type=Path, default=None)
+    parser.add_argument("--gen-score-calibration-smoothing-alpha", type=float, default=1.0)
+    parser.add_argument("--gen-score-calibration-min-count", type=int, default=1)
     return parser.parse_args(argv)
 
 
@@ -210,6 +220,10 @@ def _generate_parallel_structured_outputs(
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
+    if args.population == "final_test" and bool(args.fit_gen_score_calibration):
+        raise ValueError("fit-gen-score-calibration is forbidden for final_test")
+    if args.fit_gen_score_calibration and args.gen_score_calibration_artifact is not None:
+        raise ValueError("provide either --fit-gen-score-calibration or --gen-score-calibration-artifact, not both")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print("[1/5] Loading canonical exports + data manifest...", flush=True)
@@ -313,6 +327,49 @@ def main(argv=None) -> int:
                 node_id=int(record.node_id),
             )
         )
+    calibration_artifact_path: Path | None = None
+    calibration_artifact_hash: str | None = None
+    if args.fit_gen_score_calibration:
+        preliminary_report = evaluate_gen_only(
+            inputs=GenOnlyEvalInputs(
+                samples=tuple(samples),
+                dataset_name=records[0].dataset_name,
+                population_name=PopulationName(args.population),
+                graph_regime=records[0].graph_regime,
+                run_id=args.run_id,
+                prompt_audit_path=str(prompt_audit_path.resolve()),
+                prompt_audit_hash=prompt_audit_hash,
+            )
+        )
+        oof_metrics = fit_oof_bin_calibration_metrics(
+            dataset_name=records[0].dataset_name,
+            graph_regime=records[0].graph_regime,
+            labels=preliminary_report.labels,
+            raw_gen_scores=preliminary_report.raw_gen_score,
+            node_ids=preliminary_report.node_ids,
+            smoothing_alpha=float(args.gen_score_calibration_smoothing_alpha),
+            min_count=int(args.gen_score_calibration_min_count),
+        )
+        artifact = fit_bin_calibration(
+            dataset_name=records[0].dataset_name,
+            graph_regime=records[0].graph_regime,
+            source_population_name=PopulationName(args.population),
+            labels=preliminary_report.labels,
+            raw_gen_scores=preliminary_report.raw_gen_score,
+            node_ids=preliminary_report.node_ids,
+            smoothing_alpha=float(args.gen_score_calibration_smoothing_alpha),
+            min_count=int(args.gen_score_calibration_min_count),
+            oof_metrics=oof_metrics,
+        )
+        calibration_artifact_path = (
+            args.gen_score_calibration_output
+            or args.output_dir / f"gen_score_calibration_{args.dataset}_{args.population}.json"
+        )
+        calibration_artifact_hash = write_calibration_artifact(artifact, calibration_artifact_path)
+    elif args.gen_score_calibration_artifact is not None:
+        calibration_artifact_path = args.gen_score_calibration_artifact
+        calibration_artifact_hash = file_sha256(calibration_artifact_path)
+
     report: GenOnlyEvalReport = evaluate_gen_only(
         inputs=GenOnlyEvalInputs(
             samples=tuple(samples),
@@ -322,6 +379,8 @@ def main(argv=None) -> int:
             run_id=args.run_id,
             prompt_audit_path=str(prompt_audit_path.resolve()),
             prompt_audit_hash=prompt_audit_hash,
+            gen_score_calibration_artifact_path=None if calibration_artifact_path is None else str(calibration_artifact_path),
+            gen_score_calibration_artifact_sha256=calibration_artifact_hash,
         )
     )
 
@@ -355,6 +414,15 @@ def main(argv=None) -> int:
         "gpu_indices": gpu_indices,
         "raw_generations_path": str(raw_generations_path),
         "raw_generations_sha256": raw_generations_hash,
+        "gen_score_calibration_artifact_path": report.gen_score_calibration_artifact_path,
+        "gen_score_calibration_artifact_sha256": report.gen_score_calibration_artifact_sha256,
+        "gen_score_calibration_schema_version": report.gen_score_calibration_schema_version,
+        "gen_score_calibration_source_population": report.gen_score_calibration_source_population,
+        "raw_gen_score_retained": report.raw_gen_score_retained,
+        "calibrated_gen_score_present": report.calibrated_gen_score_present,
+        "calibrated_gen_score_feature_set": list(report.calibrated_gen_score_feature_set),
+        "final_test_calibration_fit": report.final_test_calibration_fit,
+        "gen_score_not_used_in_fusion": report.gen_score_not_used_in_fusion,
         "prompt_audit_path": str(prompt_audit_path),
         "prompt_audit_hash": prompt_audit_hash,
         "evaluation_command": current_python_command(),

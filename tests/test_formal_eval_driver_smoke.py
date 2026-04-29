@@ -4,12 +4,15 @@ import os
 import subprocess
 import sys
 
+import pytest
 import torch
 
 from graph_data.manifests import DataArtifact, DataManifest, PopulationMetadata
 from eval.head_scoring import CheckpointProvenance
 from priorf_teacher.schema import DatasetName, GraphRegime, NeighborSummary, PopulationName, RelationProfile, TeacherExportRecord
 from scripts.run_formal_gen_only_eval import _parse_args as _parse_formal_gen_only_args, _split_indexed_records
+from scripts.run_formal_gen_only_eval import main as formal_gen_only_main
+from scripts.run_generation_audit import main as generation_audit_main
 from scripts._formal_eval_helpers import (
     _trim_trailing_text_after_strict_json,
     build_head_scoring_inputs,
@@ -350,6 +353,62 @@ def test_run_formal_gen_only_eval_defaults_to_768_tokens() -> None:
     assert args.max_new_tokens == 768
     assert args.batch_size == 1
     assert args.stop_after_strict_json is True
+
+
+def test_formal_gen_only_fails_closed_if_final_test_calibration_fit_requested(tmp_path) -> None:
+    with pytest.raises(ValueError, match="forbidden for final_test"):
+        formal_gen_only_main(
+            [
+                "--dataset",
+                "amazon",
+                "--qwen-path",
+                str(tmp_path / "qwen"),
+                "--peft-adapter",
+                str(tmp_path / "adapter"),
+                "--cls-head",
+                str(tmp_path / "cls_head.pt"),
+                "--teacher-export",
+                str(tmp_path / "final.parquet"),
+                "--data-manifest",
+                str(tmp_path / "manifest.json"),
+                "--population",
+                "final_test",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--run-id",
+                "run-123",
+                "--commit",
+                "a" * 40,
+                "--config-fingerprint",
+                "cfg",
+                "--fit-gen-score-calibration",
+            ]
+        )
+
+
+def test_generation_audit_fails_closed_if_final_test_calibration_fit_requested(tmp_path) -> None:
+    with pytest.raises(ValueError, match="forbidden for final_test"):
+        generation_audit_main(
+            [
+                "--dataset",
+                "amazon",
+                "--qwen-path",
+                str(tmp_path / "qwen"),
+                "--peft-adapter",
+                str(tmp_path / "adapter"),
+                "--teacher-export",
+                str(tmp_path / "final.parquet"),
+                "--data-manifest",
+                str(tmp_path / "manifest.json"),
+                "--population",
+                "final_test",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--run-id",
+                "run-123",
+                "--fit-gen-score-calibration",
+            ]
+        )
 
 
 

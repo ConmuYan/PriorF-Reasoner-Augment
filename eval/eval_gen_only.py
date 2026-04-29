@@ -16,6 +16,13 @@ import numpy as np
 import sklearn.metrics
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError, model_validator
 
+from eval.gen_score_calibration import (
+    GEN_SCORE_CALIBRATION_FEATURE_SET,
+    GEN_SCORE_CALIBRATION_SCHEMA_VERSION,
+    apply_bin_calibration,
+    calibration_metric_bundle,
+    load_calibration_artifact,
+)
 from evidence.evidence_schema import EvidenceCard
 from evidence.leakage_policy import (
     EVIDENCE_CARD_PROJECTION,
@@ -77,6 +84,8 @@ class GenOnlyEvalInputs(BaseModel):
     gen_eval_schema_version: Literal["gen_eval/v1"] = _GEN_EVAL_SCHEMA_VERSION
     prompt_audit_path: StrictStr = Field(min_length=1)
     prompt_audit_hash: StrictStr = Field(pattern=HEX64_PATTERN)
+    gen_score_calibration_artifact_path: StrictStr | None = None
+    gen_score_calibration_artifact_sha256: str | None = Field(default=None, pattern=HEX64_PATTERN)
 
     @model_validator(mode="after")
     def _samples_consistent_with_header(self) -> "GenOnlyEvalInputs":
@@ -94,6 +103,10 @@ class GenOnlyEvalInputs(BaseModel):
                 raise ValueError(
                     f"samples[{idx}].evidence_card.graph_regime must equal top-level graph_regime"
                 )
+        if (self.gen_score_calibration_artifact_path is None) != (
+            self.gen_score_calibration_artifact_sha256 is None
+        ):
+            raise ValueError("calibration artifact path and sha256 must be provided together")
         return self
 
 
@@ -132,6 +145,25 @@ class GenOnlyEvalReport(BaseModel):
     auroc: float | None
     auprc: float | None
     brier_score: float
+
+    raw_gen_score: tuple[float, ...] = ()
+    calibrated_gen_score: tuple[float, ...] = ()
+    raw_log_loss: float | None = None
+    calibrated_auroc: float | None = None
+    calibrated_auprc: float | None = None
+    calibrated_brier_score: float | None = None
+    calibrated_log_loss: float | None = None
+    calibrated_ece_2bin: float | None = None
+    calibrated_ece_10bin: float | None = None
+    gen_score_calibration_schema_version: str | None = None
+    gen_score_calibration_source_population: Literal["validation"] | None = None
+    gen_score_calibration_artifact_path: StrictStr | None = None
+    gen_score_calibration_artifact_sha256: str | None = Field(default=None, pattern=HEX64_PATTERN)
+    raw_gen_score_retained: Literal[True] = True
+    calibrated_gen_score_present: bool = False
+    calibrated_gen_score_feature_set: tuple[str, ...] = ()
+    final_test_calibration_fit: Literal[False] = False
+    gen_score_not_used_in_fusion: Literal[True] = True
 
     probs: tuple[float, ...]
     labels: tuple[Literal[0, 1], ...]
@@ -174,6 +206,32 @@ class GenOnlyEvalReport(BaseModel):
         for prob in self.probs:
             if not math.isfinite(prob) or prob < 0.0 or prob > 1.0:
                 raise ValueError("probs must be finite and within [0.0, 1.0]")
+        if self.raw_gen_score:
+            if len(self.raw_gen_score) != self.n_total:
+                raise ValueError("len(raw_gen_score) must equal n_total when present")
+            if tuple(float(value) for value in self.raw_gen_score) != tuple(float(value) for value in self.probs):
+                raise ValueError("raw_gen_score must retain the raw parsed JSON score used by probs")
+        if self.calibrated_gen_score_present:
+            if len(self.calibrated_gen_score) != self.n_total:
+                raise ValueError("len(calibrated_gen_score) must equal n_total when present")
+            if self.gen_score_calibration_schema_version != GEN_SCORE_CALIBRATION_SCHEMA_VERSION:
+                raise ValueError("calibrated reports must carry gen_score_calibration_schema_version")
+            if self.gen_score_calibration_source_population != "validation":
+                raise ValueError("calibrated reports must be fit from validation")
+            if not self.gen_score_calibration_artifact_path:
+                raise ValueError("calibrated reports must carry gen_score_calibration_artifact_path")
+            if not self.gen_score_calibration_artifact_sha256:
+                raise ValueError("calibrated reports must carry gen_score_calibration_artifact_sha256")
+            if self.calibrated_gen_score_feature_set != GEN_SCORE_CALIBRATION_FEATURE_SET:
+                raise ValueError("unexpected calibrated_gen_score_feature_set")
+            for prob in self.calibrated_gen_score:
+                if not math.isfinite(prob) or prob < 0.0 or prob > 1.0:
+                    raise ValueError("calibrated_gen_score must be finite and within [0.0, 1.0]")
+        else:
+            if self.calibrated_gen_score:
+                raise ValueError("calibrated_gen_score must be empty when calibrated_gen_score_present=false")
+            if self.gen_score_calibration_artifact_path or self.gen_score_calibration_artifact_sha256:
+                raise ValueError("calibration artifact provenance requires calibrated_gen_score_present=true")
         return self
 
 
@@ -229,12 +287,35 @@ def evaluate_gen_only(*, inputs: GenOnlyEvalInputs) -> GenOnlyEvalReport:
 
     is_single_class = (n_positive == 0) or (n_negative == 0)
     brier_score = float(np.mean((probs_np - labels_np.astype(np.float64)) ** 2))
+    raw_log_loss = float(sklearn.metrics.log_loss(labels_np, probs_np, labels=[0, 1]))
     if is_single_class:
         auroc: float | None = None
         auprc: float | None = None
     else:
         auroc = float(sklearn.metrics.roc_auc_score(labels_np, probs_np))
         auprc = float(sklearn.metrics.average_precision_score(labels_np, probs_np))
+
+    calibrated_scores: tuple[float, ...] = ()
+    calibrated_metrics: dict[str, float | None] = {}
+    calibration_schema_version: str | None = None
+    calibration_source_population: Literal["validation"] | None = None
+    calibration_feature_set: tuple[str, ...] = ()
+    calibrated_present = False
+    if inputs.gen_score_calibration_artifact_path is not None:
+        artifact = load_calibration_artifact(
+            inputs.gen_score_calibration_artifact_path,
+            expected_sha256=inputs.gen_score_calibration_artifact_sha256,
+        )
+        if artifact.dataset_name != inputs.dataset_name:
+            raise ValueError("calibration artifact dataset_name must match gen eval inputs")
+        if artifact.graph_regime != inputs.graph_regime:
+            raise ValueError("calibration artifact graph_regime must match gen eval inputs")
+        calibrated_scores = apply_bin_calibration(artifact=artifact, raw_gen_scores=probs)
+        calibrated_metrics = calibration_metric_bundle(labels, calibrated_scores)
+        calibration_schema_version = artifact.schema_version
+        calibration_source_population = artifact.source_population_name
+        calibration_feature_set = artifact.feature_set
+        calibrated_present = True
 
     return GenOnlyEvalReport(
         dataset_name=inputs.dataset_name,
@@ -263,6 +344,24 @@ def evaluate_gen_only(*, inputs: GenOnlyEvalInputs) -> GenOnlyEvalReport:
         auroc=auroc,
         auprc=auprc,
         brier_score=brier_score,
+        raw_gen_score=tuple(float(value) for value in probs_np.tolist()),
+        calibrated_gen_score=calibrated_scores,
+        raw_log_loss=raw_log_loss,
+        calibrated_auroc=calibrated_metrics.get("auroc"),
+        calibrated_auprc=calibrated_metrics.get("auprc"),
+        calibrated_brier_score=calibrated_metrics.get("brier_score"),
+        calibrated_log_loss=calibrated_metrics.get("log_loss"),
+        calibrated_ece_2bin=calibrated_metrics.get("ece_2bin"),
+        calibrated_ece_10bin=calibrated_metrics.get("ece_10bin"),
+        gen_score_calibration_schema_version=calibration_schema_version,
+        gen_score_calibration_source_population=calibration_source_population,
+        gen_score_calibration_artifact_path=inputs.gen_score_calibration_artifact_path,
+        gen_score_calibration_artifact_sha256=inputs.gen_score_calibration_artifact_sha256,
+        raw_gen_score_retained=True,
+        calibrated_gen_score_present=calibrated_present,
+        calibrated_gen_score_feature_set=calibration_feature_set,
+        final_test_calibration_fit=False,
+        gen_score_not_used_in_fusion=True,
         probs=tuple(float(value) for value in probs_np.tolist()),
         labels=tuple(int(value) for value in labels_np.tolist()),
         node_ids=tuple(int(value) for value in node_ids_np.tolist()),
