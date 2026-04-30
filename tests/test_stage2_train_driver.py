@@ -282,6 +282,8 @@ def test_teacher_export_manifest_provenance_records_seed42_fields(tmp_path: Path
     assert fields["teacher_export_validation_checkpoint_path"] == "/models/priorf/seed_42/best_model.pt"
     assert fields["teacher_export_validation_checkpoint_sha256"] == "e" * 64
     assert fields["teacher_export_validation_node_ids_hash"] == "d" * 64
+    assert fields["teacher_export_validation_split_values"] == [PopulationName.VALIDATION.value]
+    assert len(fields["teacher_export_validation_split_hash"]) == 64
     assert fields["teacher_export_validation_row_count"] == 17
 
 
@@ -501,6 +503,30 @@ def test_aggregate_step_reports_weights_by_samples() -> None:
     assert combined.classification_loss == pytest.approx(3.5)
     assert combined.distillation_loss == pytest.approx(4.5)
     assert combined.total_loss == pytest.approx(2.5 + 2.0 * 3.5 + 3.0 * 4.5)
+    assert combined.grad_norm is None
+
+
+def test_aggregate_step_reports_keeps_final_grad_norm() -> None:
+    report_a = stage2_train_driver.CanonicalStepReport(
+        n_samples=2,
+        generation_loss=1.0,
+        classification_loss=2.0,
+        distillation_loss=3.0,
+        total_loss=1.0 + 2.0 * 2.0 + 3.0 * 3.0,
+        lambda_cls=2.0,
+        lambda_distill=3.0,
+        generation_prompt_mode="train",
+        classification_prompt_mode="eval_head",
+        distillation_target="clipped_teacher_prob_bce",
+        thinking_mode=ThinkingMode.NON_THINKING,
+        graph_regime=GraphRegime.TRANSDUCTIVE_STANDARD,
+        used_accelerate_backward=True,
+    )
+    report_b = report_a.model_copy(update={"grad_norm": 7.5})
+
+    combined = stage2_train_driver._aggregate_step_reports((report_a, report_b))
+
+    assert combined.grad_norm == pytest.approx(7.5)
 
 
 def test_stage2_driver_accepts_gradient_accumulation_and_validates_early_stopping() -> None:

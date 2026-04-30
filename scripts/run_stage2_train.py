@@ -204,6 +204,10 @@ def _teacher_export_manifest_provenance(path: Path | None, *, prefix: str) -> di
         f"{prefix}_checkpoint_path": manifest.provenance.teacher_checkpoint_path,
         f"{prefix}_checkpoint_sha256": manifest.provenance.teacher_checkpoint_sha256,
         f"{prefix}_node_ids_hash": manifest.node_ids_hash,
+        f"{prefix}_split_values": list(manifest.split_values),
+        f"{prefix}_split_hash": hashlib.sha256(
+            json.dumps(list(manifest.split_values), separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest(),
         f"{prefix}_row_count": int(manifest.row_count),
     }
 
@@ -465,12 +469,14 @@ def _aggregate_step_reports(reports: tuple[CanonicalStepReport, ...]) -> Canonic
     def weighted(field_name: str) -> float:
         return sum(float(getattr(report, field_name)) * float(report.n_samples) for report in reports) / float(n_samples)
 
+    grad_norm = next((report.grad_norm for report in reversed(reports) if report.grad_norm is not None), None)
     return CanonicalStepReport(
         n_samples=n_samples,
         generation_loss=weighted("generation_loss"),
         classification_loss=weighted("classification_loss"),
         distillation_loss=weighted("distillation_loss"),
         total_loss=weighted("total_loss"),
+        grad_norm=grad_norm,
         lambda_cls=float(first.lambda_cls),
         lambda_distill=float(first.lambda_distill),
         generation_prompt_mode=first.generation_prompt_mode,
@@ -480,6 +486,24 @@ def _aggregate_step_reports(reports: tuple[CanonicalStepReport, ...]) -> Canonic
         graph_regime=first.graph_regime,
         used_accelerate_backward=all(bool(report.used_accelerate_backward) for report in reports),
     )
+
+
+def _gpu_memory_stats(device_str: str) -> dict[str, int | None]:
+    if not device_str.startswith("cuda") or not torch.cuda.is_available():
+        return {
+            "gpu_memory_allocated_mib": None,
+            "gpu_memory_reserved_mib": None,
+            "gpu_max_memory_allocated_mib": None,
+            "gpu_max_memory_reserved_mib": None,
+        }
+    device = torch.device(device_str)
+    mib = 1024 * 1024
+    return {
+        "gpu_memory_allocated_mib": int(torch.cuda.memory_allocated(device) // mib),
+        "gpu_memory_reserved_mib": int(torch.cuda.memory_reserved(device) // mib),
+        "gpu_max_memory_allocated_mib": int(torch.cuda.max_memory_allocated(device) // mib),
+        "gpu_max_memory_reserved_mib": int(torch.cuda.max_memory_reserved(device) // mib),
+    }
 
 
 def _resolve_shared_graph_regime(
@@ -692,8 +716,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tensorboard-dir", type=Path, default=None,
                         help="Directory for TensorBoard event files. "
                              "Defaults to <output-dir>/tb when --no-tensorboard is not set.")
+    parser.add_argument("--tensorboard-log-dir", dest="tensorboard_dir", type=Path,
+                        help="Alias for --tensorboard-dir.")
     parser.add_argument("--no-tensorboard", action="store_true",
                         help="Disable TensorBoard logging (default: enabled).")
+    parser.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True,
+                        help="Show tqdm optimizer-step progress bar when tqdm is available.")
     return parser.parse_args(argv)
 
 
@@ -904,6 +932,23 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     tb_logger = TensorBoardLogger(tb_log_dir, enabled=not args.no_tensorboard)
     if tb_logger.enabled:
         print(f"       tensorboard logdir = {tb_logger.log_dir}", flush=True)
+    progress_bar = None
+    progress_bar_available = False
+    progress_bar_warning: str | None = None
+    if args.progress_bar:
+        try:
+            from tqdm.auto import tqdm  # noqa: E402
+
+            progress_bar = tqdm(
+                total=total_steps,
+                desc=f"stage2-{args.dataset}-gpu{args.gpu_index}",
+                unit="step",
+                dynamic_ncols=True,
+            )
+            progress_bar_available = True
+        except Exception as exc:  # pragma: no cover - depends on optional runtime package
+            progress_bar_warning = f"tqdm unavailable: {exc}"
+            print(f"       WARN: {progress_bar_warning}; falling back to periodic prints", flush=True)
     smoothing_window = 50
     sma_L_gen = _RollingMean(smoothing_window)
     sma_L_cls = _RollingMean(smoothing_window)
@@ -943,6 +988,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     for step in range(total_steps):
         micro_reports: list[CanonicalStepReport] = []
         optimizer_step_samples = 0
+        optimizer_step_positive_count = 0
+        optimizer_step_negative_count = 0
         for micro_idx in range(grad_accum_steps):
             batch_indices = _next_stratified_batch_indices(
                 positive_indices=positive_indices,
@@ -954,6 +1001,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             )
             batch_samples = tuple(train_samples[i] for i in batch_indices)
             batch = CanonicalTrainingBatch(samples=batch_samples)
+            batch_pos = sum(1 for sample in batch_samples if int(sample.ground_truth_label) == 1)
+            optimizer_step_positive_count += batch_pos
+            optimizer_step_negative_count += len(batch_samples) - batch_pos
             micro_report = run_canonical_train_step(
                 config=config,
                 batch=batch,
@@ -987,17 +1037,32 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             else float("nan")
         )
         epoch_progress = float(steps_completed) / float(iters_per_epoch)
+        memory_stats = _gpu_memory_stats(device_str)
         log_row = {
             "step": step,
+            "optimizer_step": steps_completed,
+            "epoch": epoch_progress,
             "lr": current_lr,
             "L_gen": step_report.generation_loss,
             "L_cls": step_report.classification_loss,
             "L_distill": step_report.distillation_loss,
             "total": step_report.total_loss,
+            "loss_gen": step_report.generation_loss,
+            "loss_cls": step_report.classification_loss,
+            "loss_distill": step_report.distillation_loss,
+            "loss_total": step_report.total_loss,
+            "grad_norm": step_report.grad_norm,
             "samples_seen": samples_seen,
             "optimizer_step_samples": optimizer_step_samples,
+            "batch_positive_count": optimizer_step_positive_count,
+            "batch_negative_count": optimizer_step_negative_count,
+            "micro_batch_size": int(args.batch_size),
             "micro_batches_seen": micro_batches_seen,
             "gradient_accumulation_steps": grad_accum_steps,
+            "effective_batch_size": int(args.batch_size) * grad_accum_steps,
+            "gpu_index": int(args.gpu_index),
+            "distributed_rank": 0,
+            **memory_stats,
             "elapsed_seconds": elapsed_seconds,
             "eta_seconds": eta_seconds,
         }
@@ -1015,10 +1080,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 "L_cls": step_report.classification_loss,
                 "L_distill": step_report.distillation_loss,
                 "total": step_report.total_loss,
+                "grad_norm": step_report.grad_norm,
                 "steps_per_sec": steps_per_second,
                 "samples_seen": samples_seen,
+                "effective_batch_size": int(args.batch_size) * grad_accum_steps,
                 "optimizer_step_samples": optimizer_step_samples,
                 "micro_batches_seen": micro_batches_seen,
+                "batch_positive_count": optimizer_step_positive_count,
+                "batch_negative_count": optimizer_step_negative_count,
+                "gpu_memory_allocated_mib": memory_stats["gpu_memory_allocated_mib"],
+                "gpu_memory_reserved_mib": memory_stats["gpu_memory_reserved_mib"],
                 f"L_gen_sma{smoothing_window}": sma_L_gen.value,
                 f"L_cls_sma{smoothing_window}": sma_L_cls.value,
                 f"L_distill_sma{smoothing_window}": sma_L_distill.value,
@@ -1026,6 +1097,17 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             },
             step + 1,
         )
+        if progress_bar is not None:
+            progress_bar.update(1)
+            progress_bar.set_postfix(
+                {
+                    "epoch": f"{epoch_progress:.2f}",
+                    "loss": f"{step_report.total_loss:.4f}",
+                    "lr": f"{current_lr:.1e}",
+                    "sps": f"{steps_per_second:.2f}",
+                    "gpu": int(args.gpu_index),
+                }
+            )
         if step == 0 or (step + 1) % max(1, total_steps // 20) == 0 or step == total_steps - 1:
             print(
                 f"       step {steps_completed:>4}/{total_steps}: "
@@ -1086,6 +1168,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 "validation_prob_std": monitor_report.prob_std,
                 "validation_elapsed_seconds": validation_elapsed_seconds,
                 "early_stopping_patience_counter": early_stopping_patience_counter,
+                "selected_best_checkpoint_metric": args.best_checkpoint_metric,
+                "best_checkpoint_metric_value": best_checkpoint_metric_value,
             }) + "\n")
             train_log_f.flush()
             metric_value = _best_checkpoint_metric_value(monitor_report, args.best_checkpoint_metric)
@@ -1140,8 +1224,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 flush=True,
             )
             break
+    if progress_bar is not None:
+        progress_bar.close()
     train_log_f.close()
     tb_logger.flush()
+    if tb_logger.warning:
+        print(f"       WARN: {tb_logger.warning}; JSONL logging remains enabled", flush=True)
     assert last_step_report is not None
 
     print("[6/7] Saving PEFT adapter + cls_head checkpoint...", flush=True)
@@ -1292,6 +1380,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         "early_stop_step": early_stop_step,
         "early_stop_reason": early_stop_reason,
         "early_stopping_patience_counter": early_stopping_patience_counter,
+        "progress_bar_requested": bool(args.progress_bar),
+        "progress_bar_available": progress_bar_available,
+        "progress_bar_warning": progress_bar_warning,
+        "tensorboard_enabled": bool(tb_logger.enabled),
+        "tensorboard_log_dir": str(tb_logger.log_dir) if tb_logger.log_dir is not None else None,
+        "tensorboard_warning": tb_logger.warning,
+        "distributed_strategy": "single_process_single_gpu",
+        "world_size": 1,
+        "rank": 0,
+        "gpu_index": int(args.gpu_index),
         "checkpoint_source": "final_checkpoint",
         "checkpoint_dir": str(final_checkpoint_dir.resolve()),
         "best_checkpoint_dir": (

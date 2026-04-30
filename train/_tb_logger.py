@@ -29,6 +29,7 @@ class TensorBoardLogger:
         self._enabled = bool(enabled and log_dir is not None)
         self._writer: Any | None = None
         self._log_dir: Path | None = Path(log_dir) if log_dir is not None else None
+        self._warning: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -38,12 +39,21 @@ class TensorBoardLogger:
     def log_dir(self) -> Path | None:
         return self._log_dir
 
+    @property
+    def warning(self) -> str | None:
+        return self._warning
+
     def _ensure_writer(self) -> Any | None:
         if not self._enabled:
             return None
         if self._writer is not None:
             return self._writer
-        from torch.utils.tensorboard import SummaryWriter
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+        except Exception as exc:  # pragma: no cover - depends on optional runtime package
+            self._warning = f"TensorBoard SummaryWriter unavailable: {exc}"
+            self._enabled = False
+            return None
 
         assert self._log_dir is not None
         self._log_dir.mkdir(parents=True, exist_ok=True)

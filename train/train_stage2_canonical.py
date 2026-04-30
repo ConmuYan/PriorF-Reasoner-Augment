@@ -174,6 +174,7 @@ class CanonicalStepReport(BaseModel):
     classification_loss: float = Field(ge=0.0)
     distillation_loss: float = Field(ge=0.0)
     total_loss: float = Field(ge=0.0)
+    grad_norm: float | None = Field(default=None, ge=0.0)
     lambda_cls: float = Field(gt=0.0)
     lambda_distill: float = Field(gt=0.0)
     generation_prompt_mode: Literal["train"]
@@ -189,6 +190,8 @@ class CanonicalStepReport(BaseModel):
             value = float(getattr(self, field_name))
             if not isfinite(value):
                 raise ValueError(f"{field_name} must be finite")
+        if self.grad_norm is not None and not isfinite(float(self.grad_norm)):
+            raise ValueError("grad_norm must be finite when populated")
         expected_total = self.generation_loss + self.lambda_cls * self.classification_loss + self.lambda_distill * self.distillation_loss
         if abs(self.total_loss - expected_total) > 1e-5:
             raise ValueError("total_loss must equal L_gen + lambda_cls*L_cls + lambda_distill*L_distill")
@@ -368,9 +371,16 @@ def run_canonical_train_step(
     _require_finite_tensor(total_loss, "total_loss")
 
     accelerator.backward(total_loss * float(loss_scale))
+    grad_norm: float | None = None
     if optimizer_step:
         if config.max_grad_norm is not None:
-            accelerator.clip_grad_norm_(list(model.parameters()) + list(_module_parameters(cls_head)), config.max_grad_norm)
+            grad_norm_tensor = accelerator.clip_grad_norm_(
+                list(model.parameters()) + list(_module_parameters(cls_head)),
+                config.max_grad_norm,
+            )
+            grad_norm = float(grad_norm_tensor.detach().cpu().item() if hasattr(grad_norm_tensor, "detach") else grad_norm_tensor)
+        else:
+            grad_norm = _compute_grad_norm(list(model.parameters()) + list(_module_parameters(cls_head)))
         optimizer.step()
 
     return CanonicalStepReport(
@@ -379,6 +389,7 @@ def run_canonical_train_step(
         classification_loss=float(classification_loss.detach().cpu().item()),
         distillation_loss=float(distillation_loss.detach().cpu().item()),
         total_loss=float(total_loss.detach().cpu().item()),
+        grad_norm=grad_norm,
         lambda_cls=float(config.lambda_cls),
         lambda_distill=float(config.lambda_distill),
         generation_prompt_mode=PromptMode.TRAIN.value,
@@ -388,6 +399,19 @@ def run_canonical_train_step(
         graph_regime=config.graph_regime,
         used_accelerate_backward=True,
     )
+
+
+def _compute_grad_norm(parameters: Sequence[torch.nn.Parameter]) -> float | None:
+    norms = []
+    for parameter in parameters:
+        grad = parameter.grad
+        if grad is None:
+            continue
+        norms.append(torch.linalg.vector_norm(grad.detach().to(torch.float32), ord=2))
+    if not norms:
+        return None
+    total = torch.linalg.vector_norm(torch.stack(norms), ord=2)
+    return float(total.detach().cpu().item())
 
 
 def run_validation_with_unified_scorer(

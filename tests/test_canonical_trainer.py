@@ -357,6 +357,8 @@ def test_canonical_train_step_supports_explicit_gradient_accumulation_controls()
     )
 
     assert second.n_samples == 2
+    assert second.grad_norm is not None
+    assert second.grad_norm > 0.0
     assert not torch.equal(before, model.weight.detach())
 
 
