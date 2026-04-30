@@ -1173,6 +1173,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             }) + "\n")
             train_log_f.flush()
             metric_value = _best_checkpoint_metric_value(monitor_report, args.best_checkpoint_metric)
+            tb_logger.log_scalars(
+                "validation",
+                {
+                    "auroc": monitor_report.auroc,
+                    "auprc": monitor_report.auprc,
+                    "brier": monitor_report.brier_score,
+                    "prob_std": monitor_report.prob_std,
+                    "n_total": monitor_report.n_total,
+                    "elapsed_seconds": validation_elapsed_seconds,
+                    "selected_metric": metric_value,
+                    "early_stopping_patience_counter": early_stopping_patience_counter,
+                },
+                step + 1,
+            )
             improved = (
                 best_checkpoint_metric_value is None
                 or metric_value > best_checkpoint_metric_value + float(args.early_stopping_min_delta)
