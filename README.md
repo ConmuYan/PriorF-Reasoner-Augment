@@ -1,198 +1,319 @@
 # PriorF-Reasoner
 
-Fail-closed training and evaluation harness for a compact language model
-that reads teacher-derived structural Evidence Cards and produces
-auditable fraud-detection probabilities + strict-schema rationales.
+PriorF-Reasoner is a leakage-sensitive teacher-student framework for graph
+anomaly detection. It converts structural signals from a PriorF-GNN teacher into
+schema-validated Evidence Cards, trains a compact Qwen3-4B student to read those
+cards, and evaluates the student through auditable `head_only`, `gen_only`,
+`fusion`, and faithfulness reports.
 
-This README is the top-level orientation.  Operators looking for a
-concrete runbook go to `docs/040_operator_runbook.md`; developers
-looking for contracts go to `docs/010_project_contract.md`,
-`docs/020_top_level_design.md`, `docs/030_harness_agent_execution_guide.md`,
-and `docs/050_fail_closed_guardrails.md`.
+The project is not a generic LLM fraud detector. The student never consumes raw
+graph adjacency matrices or raw review text. Its input is the Evidence Card: a
+controlled, provenance-tracked serialization of teacher-derived graph evidence.
 
-## What the system is (and is not)
+## Core Claim
 
-**Is.** A harness around a compact student LM + classification head that:
-
-* consumes schema-validated Evidence Cards built from a pretrained
-  PriorF teacher,
-* is trained canonically with generation + classification + distillation
-  losses under Accelerate,
-* is evaluated formally with frozen validation thresholds / alpha and
-  gated by an executable `gate_manifest.json`.
-
-**Is not.** A drop-in LLM for raw graph input, a generic "LLM-replaces-GNN"
-claim, or a system whose head metrics can be trusted without the formal
-eval path in this repo.
-
-## Three output namespaces
-
-Every launcher writes under exactly one of:
-
-* `outputs/diagnostic/` — smoke runs, exploratory probes, paraphrased
-  parse audits. Never counts as a formal result.
-* `outputs/gated/` — canonical training checkpoints that have not yet
-  cleared the full gate manifest. Used for parity checks and gate
-  evidence generation; not reported as formal metrics.
-* `outputs/formal/` — only reachable via `scripts/run_full_pipeline.sh
-  --mode formal --gate-manifest PATH` with a passing
-  `scripts/gate_check.py`. Every field of `GateManifest` must be `True`.
-
-Silent fallbacks between namespaces are forbidden. A failing gate
-manifest causes the formal launcher to exit non-zero without creating
-any `outputs/formal/` directory.
-
-## What counts as success
-
-A green run is only considered valid if **all** of the following hold:
-
-* `scripts/gate_check.py` passes a complete `gate_manifest.json`
-  (every required gate is `True`),
-* head / fusion / gen-only / faithfulness reports are produced via the
-  modules in `eval/` (not reimplemented downstream),
-* teacher-probability ablation audit (`evidence.ablations`) does **not**
-  flag `teacher_prob_dependency_high` above the agreed threshold for
-  the reported population,
-* fusion reports `student_contribution_pass = True` at the selected
-  `optimal_alpha`,
-* strict-schema parse rate (`eval/eval_gen_only.py`) is the headline
-  parse metric; normalized parse rate is diagnostic only.
-
-## What explicitly does not count as success
-
-* **Teacher fallback is not student success.** A fusion whose
-  `optimal_alpha` collapses to `0.0` means the student contributes
-  nothing; the system is reporting the teacher, not the student.
-  `student_contribution_pass` must be `True`.
-* **Low-alpha fusion is not success.** Even an `optimal_alpha` near
-  zero that nominally beats either branch alone is not a valid "fusion
-  works" claim; `min_student_alpha` in `FusionEvalConfig` is there to
-  enforce this.
-* **Normalized parse is not schema compliance.** Only
-  `strict_schema_parse_rate` counts as schema compliance. Normalized /
-  alias parsers live exclusively in the diagnostic path.
-* **Oracle same-population thresholds are not formal metrics.** Any
-  report that tunes a decision threshold on the rows it is reporting
-  is, by construction, diagnostic.
-* **Small-sample faithfulness is not formal faithfulness.** Faithfulness
-  below the minimum sample size is marked as smoke / diagnostic and
-  does not enter the gate manifest.
-
-## One-line quick starts
-
-The launchers are thin wrappers over `scripts/run_full_pipeline.sh`.
-Each forwards to the right output namespace:
-
-```bash
-# Fail-closed smoke check on canonical plumbing (diagnostic namespace only).
-scripts/run_smoke.sh
-
-# Stage 1 (structured-generation SFT) in gated namespace.
-scripts/run_stage1.sh -- python -m train.stage1_sft ...
-# Writes a gated LoRA adapter + run_record.json; current Stage 2 still starts
-# from the base Qwen checkpoint unless explicitly extended in a later round.
-
-# Stage 2 (canonical Accelerate trainer: L_gen + L_cls + L_distill) in gated namespace.
-scripts/run_stage2.sh -- python -m train.train_stage2_canonical ...
-
-# Formal evaluation.  Requires a valid gate manifest; gate_check runs first.
-scripts/run_eval.sh --gate-manifest outputs/gated/gate_manifest.json -- \
-    python -m eval.eval_head_only ...
+```text
+PriorF-GNN teacher
+  -> teacher export with split/provenance metadata
+  -> student-safe Evidence Card
+  -> Qwen3-4B student reasoner
+  -> head_only / gen_only / fusion / faithfulness evaluation
 ```
 
-Every launcher respects `--output-root DIR` (default `outputs`).
+The research claim is that structural priors from PriorF-GNN can be serialized
+into non-leaking Evidence Cards that let a compact language model learn useful
+student fraud probabilities, produce strict-schema explanations, and contribute
+non-trivial signal when fused with the teacher.
 
-## End-to-end pipeline on real Qwen3-4B + Amazon / YelpChi
+## What Counts As Valid
 
-The `scripts/run_full_stage2_pipeline.sh` driver chains the five stages
-required to go from raw legacy `.mat` files to a formal head-only eval
-report on one dataset:
+A result is valid only when it satisfies the formal path:
 
-1. `scripts/legacy_mat_to_canonical.py` - legacy CIKM 2020 `.mat` ->
-   canonical `x`/`ground_truth_label`/`split_vector`/`relation_*` `.mat`.
-2. `scripts/generate_teacher_exports.py` - runs `LGHGCLNetV2` inference
-   on the canonical `.mat`, writes validated
-   `outputs/gated/teacher_exports/<ds>/<pop>/teacher_export.parquet`
-   (TRAIN / VALIDATION / FINAL_TEST) + `DataManifest` +
-   `TeacherBaselineReport`.  Fail-closed `_git_head_sha_or_fail` pins a
-   real commit sha into every `TeacherProvenance`.
-3. `scripts/run_stage2_train.py` - multi-step canonical joint trainer:
-   Qwen3-4B backbone + PEFT LoRA adapter on `{q_proj, v_proj}` +
-   activation checkpointing + trainable linear `cls_head`, running
-   `run_canonical_train_step` in a loop.  Saves `peft_adapter/` +
-   `cls_head.pt` + `CanonicalTrainerRunRecord` + per-step JSONL log.
-4. `scripts/run_stage2_inference.py` - head-only scoring on
-   `final_test`: loads PEFT adapter + `cls_head.pt`, builds canonical
-   `EvidenceCards` via `build_evidence_card`, runs `score_head`, writes
-   a `ScorerReport` under `outputs/gated/eval/<ds>/`.
-5. `scripts/run_formal_head_only_eval.py` - formal head-only eval:
-   validation-only F1 threshold freezing + frozen-threshold headline
-   metrics on `final_test` + calibration summary + optional oracle
-   diagnostics.  Writes `FormalHeadOnlyReport` under
-   `outputs/formal/head_only/<ds>/`.
+- data manifest and teacher export provenance are present and schema-valid;
+- Evidence Cards use the approved leakage policy and prompt builder;
+- thresholds are selected on validation only;
+- fusion alpha is selected on validation only;
+- `final_test` is used only as the frozen report population;
+- gate manifest generation and `scripts/gate_check.py` pass;
+- reports are generated by the canonical eval modules in this repository.
 
-Run the whole chain for one dataset:
+The following are explicitly not valid research claims:
+
+- teacher fallback with `alpha = 0.0` presented as student success;
+- oracle threshold tuning on the reported evaluation pool;
+- normalized parse rate reported as formal schema compliance;
+- diagnostic outputs promoted into formal results;
+- benchmark claims made with mismatched teacher checkpoint provenance.
+
+## Current Reporting Status
+
+The repository contains tooling for both internal seed717 formal analysis and a
+benchmark-compatible seed42 rerun path. The current status is intentionally
+conservative:
+
+- Amazon Stage 10 v3 and YelpChi Stage Y.7/Y.8 remain frozen internal clean
+  results for the seed717 teacher-export lineage.
+- Those seed717 results must not be reported as CARE-GNN benchmark-comparable
+  claims.
+- The first seed42 benchmark-compatible formal acceptance attempt was marked
+  superseded/non-comparable because the seed42-named teacher exports were
+  metric-equivalent to the old/default exports and did not match the expected
+  seed42 teacher metrics.
+- A benchmark-compatible claim requires regenerated and validated seed42 teacher
+  exports, hardened gate checks, fresh Stage-1/Stage-2 training if teacher
+  exports change, and a new explicitly approved one-time formal cycle.
+
+## Execution Paths
+
+The codebase separates execution into three paths:
+
+- `diagnostic`: smoke tests, probes, sampled audits, and repair runs. These
+  outputs are never formal claims.
+- `gated`: canonical training and validation artifacts that may support a later
+  formal package after all checks pass.
+- `formal`: archival reporting after validation-only policy selection and a
+  passing gate manifest.
+
+Never mix these paths. If a gate, schema, provenance check, parity check, or
+leakage audit fails, stop and classify the output as invalid or diagnostic.
+
+## Repository Layout
+
+```text
+docs/                 Source-of-truth contracts, runbooks, guardrails
+evidence/             Evidence Card schema, leakage policy, prompt builder
+priorf_teacher/       Teacher inference/export schema and baseline gate
+train/                Stage-1 SFT and canonical Stage-2 joint training
+eval/                 Head-only, gen-only, fusion, faithfulness, calibration
+schemas/              Pydantic gate manifest contract
+scripts/              Operational drivers and formal launch helpers
+tests/                Contract, parity, schema, generation, and gate tests
+outputs/              Local generated artifacts; ignored by git
+assets/               Local datasets/models; large artifacts ignored by git
+```
+
+Important contracts:
+
+- `docs/010_project_contract.md`
+- `docs/020_top_level_design.md`
+- `docs/050_fail_closed_guardrails.md`
+- `read.md`
+- `CLAUDE.md`
+
+Read these before changing train, eval, evidence, teacher export, or formal gate
+code.
+
+## Model Lanes
+
+### `head_only`
+
+The independent student detector:
+
+```text
+p_cls = cls_head(hidden_prompt_only)
+```
+
+The hidden state must come from the single canonical mask-aware extraction path.
+Validation-time scoring and offline evaluation must use the same head scorer.
+
+### `gen_only`
+
+The structured generation lane emits strict JSON:
+
+```json
+{
+  "rationale": "...",
+  "evidence": ["..."],
+  "pattern_hint": "...",
+  "label": "fraud",
+  "score": 0.93
+}
+```
+
+Strict schema parse rate is the formal parse metric. Normalized parsing is a
+diagnostic aid only. Generation score calibration is supported as reporting
+tooling, but calibrated generation scores must not be silently connected to
+canonical fusion.
+
+### `fusion`
+
+Teacher-student fusion is:
+
+```text
+p_final = alpha * p_cls + (1 - alpha) * p_teacher
+```
+
+Alpha is selected on validation only, then frozen for final reporting. A strong
+teacher with `alpha = 0.0` is teacher fallback, not student contribution.
+
+### Faithfulness
+
+Faithfulness uses schema-preserving ablations through the same inference path as
+formal evaluation. Teacher-probability/logit ablation is required when those
+fields are present in Evidence Cards.
+
+## Environment
+
+The operational environment used for the recent formal and validation runs was:
+
+```text
+Python 3.10
+PyTorch + CUDA
+Transformers
+PEFT
+TRL
+Accelerate
+Safetensors
+Pydantic
+```
+
+Validate the local environment before serious runs:
 
 ```bash
-bash scripts/run_full_stage2_pipeline.sh \
+/data1/mq/conda_envs/priorf_reasoner/bin/python \
+  scripts/validate_environment.py --baseline env_baseline.json
+```
+
+Run the test suite before formal-safe training or reporting:
+
+```bash
+/data1/mq/conda_envs/priorf_reasoner/bin/python -m pytest -q tests/
+```
+
+## Typical Workflow
+
+### 1. Build or verify teacher exports
+
+```bash
+/data1/mq/conda_envs/priorf_reasoner/bin/python scripts/generate_teacher_exports.py \
+  --dataset amazon \
+  --teacher-export-namespace teacher_exports \
+  --device cuda:0
+```
+
+For benchmark-compatible work, do not reuse the default namespace. Use a fresh
+versioned namespace and verify teacher-only metrics against the expected teacher
+checkpoint before any Reasoner training.
+
+### 2. Run leakage and prompt audits
+
+Use train and validation only. Student-visible prompts must use the
+`student_safe_v1` Evidence Card projection and
+`evidence_leakage_policy/v1`.
+
+Required prompt-safety conditions:
+
+- `teacher_prob_masked = true`
+- `teacher_logit_masked = true`
+- `neighbor_label_counts_visible = false`
+- no student-visible labeled/positive/negative/unlabeled neighbor counts
+
+### 3. Stage-1 structured generation SFT
+
+```bash
+/data1/mq/conda_envs/priorf_reasoner/bin/python -m train.stage1_sft \
   --dataset amazon \
   --qwen-path /data1/mq/models/Qwen3-4B-Instruct-2507 \
-  --max-steps 40 --batch-size 2 \
-  --max-train-samples 1024 \
-  --validation-subset 128 --final-test-subset 256 \
-  --gpu-index 0
+  --teacher-export-train outputs/gated/teacher_exports/amazon/train/teacher_export.parquet \
+  --data-manifest manifests/amazon/data_manifest.json \
+  --output-dir outputs/gated/stage1_sft/amazon_sft \
+  --max-steps 300 \
+  --batch-size 2 \
+  --seed 0
 ```
 
-Use `--skip-teacher-exports` to reuse cached parquets for rapid
-experimentation over different training recipes.
+Stage-1 exists to restore strict generation schema behavior. A generation smoke
+run is not a formal result.
 
-For a quick plumbing smoke that does **not** require canonical teacher
-exports, `scripts/run_head_only_smoke.py` and
-`scripts/run_stage2_train_smoke.py` operate on the legacy
-`assets/teacher_exports/*.parquet` and write only under
-`outputs/diagnostic/`.
+### 4. Stage-2 canonical joint training
 
-## Prompt / task bundle
+```bash
+/data1/mq/conda_envs/priorf_reasoner/bin/python scripts/run_stage2_train.py \
+  --dataset amazon \
+  --qwen-path /data1/mq/models/Qwen3-4B-Instruct-2507 \
+  --teacher-export-train outputs/gated/teacher_exports/amazon/train/teacher_export.parquet \
+  --teacher-export-validation outputs/gated/teacher_exports/amazon/validation/teacher_export.parquet \
+  --data-manifest manifests/amazon/data_manifest.json \
+  --warm-start-adapter outputs/gated/stage1_sft/amazon_sft/peft_adapter \
+  --output-dir outputs/gated/stage2/amazon_candidate \
+  --num-epochs 3 \
+  --batch-size 8 \
+  --gradient-accumulation-steps 4 \
+  --validation-every-n-steps 100 \
+  --best-checkpoint-metric validation_auprc \
+  --early-stopping-patience 4 \
+  --seed 0
+```
 
-Historical prompt bundle used to bring the project up to the current
-15-task contract:
+Canonical Stage-2 must include generation, classification, and distillation
+losses. A run that disables any of those terms is diagnostic.
 
-## 建议使用方式
+### 5. Validation-only diagnostics
 
-1. 先把仓库内 source-of-truth 文档落盘：
-   - `docs/010_project_contract.md`
-   - `docs/020_top_level_design.md`
-   - `docs/030_harness_agent_execution_guide.md`
-   - `docs/050_fail_closed_guardrails.md`
-   - `read.md`
-   - `CLAUDE.md`
+Before any formal run, use validation only:
 
-2. 先用只读模式让 Codex 审阅文档，再按 Task 逐个执行。
+- full validation `head_only` scoring;
+- validation generation audit;
+- validation fusion alpha sweep;
+- leakage audit;
+- faithfulness smoke/diagnostic if available;
+- no `final_test` content access except path/hash provenance.
 
-3. 每个 Task 都要：
-   - 先贴 `prompts/00_master_control_prompt.txt`
-   - 再贴对应 Task prompt
-   - 写完后贴 `prompts/98_self_review_prompt.txt`
-   - 审核通过后贴 `prompts/99_wrapup_prompt.txt`
+### 6. Formal evaluation
 
-## 文件目录
+Run formal evaluation only after a fully green go/no-go package. The formal
+chain includes:
 
-- `codex_operation_guide.md`
-- `prompts/00_master_control_prompt.txt`
-- `prompts/01_task_01_data_foundations.txt`
-- `prompts/02_task_02_teacher_contract_and_baseline_gate.txt`
-- `prompts/03_task_03_evidence_card_and_output_schema.txt`
-- `prompts/04_task_04_hidden_state_pooling.txt`
-- `prompts/05_task_05_unified_head_scoring.txt`
-- `prompts/06_task_06_eval_head_parity_test.txt`
-- `prompts/07_task_07_gate_manifest_and_gate_check.txt`
-- `prompts/08_task_08_formal_launcher_gate_integration.txt`
-- `prompts/09_task_09_canonical_joint_trainer.txt`
-- `prompts/10_task_10_formal_head_only_eval.txt`
-- `prompts/11_task_11_teacher_prob_ablation_audit.txt`
-- `prompts/12_task_12_formal_fusion_eval.txt`
-- `prompts/13_task_13_formal_generation_eval.txt`
-- `prompts/14_task_14_formal_faithfulness_eval.txt`
-- `prompts/15_task_15_readme_runbook_and_launcher_closure.txt`
-- `prompts/98_self_review_prompt.txt`
-- `prompts/99_wrapup_prompt.txt`
+- `scripts/run_formal_head_only_eval.py`
+- `scripts/run_formal_gen_only_eval.py`
+- `scripts/run_formal_fusion_eval.py`
+- `scripts/run_formal_faithfulness.py`
+- `scripts/generate_gate_manifest.py`
+- `scripts/gate_check.py`
+
+Do not rerun a formal `final_test` chain to chase metrics. If a formal run fails
+quality, leakage, provenance, or schema gates, stop and mark it invalid.
+
+## Testing
+
+Useful targeted tests:
+
+```bash
+/data1/mq/conda_envs/priorf_reasoner/bin/python -m pytest -q \
+  tests/test_eval_head_parity.py \
+  tests/test_generation_audit.py \
+  tests/test_stage1_sft.py \
+  tests/test_stage2_train_driver.py \
+  tests/test_eval_gen_only.py \
+  tests/test_eval_fusion.py \
+  tests/test_faithfulness.py \
+  tests/test_gate_check.py \
+  tests/test_generate_gate_manifest.py
+```
+
+Run the full suite after source changes:
+
+```bash
+/data1/mq/conda_envs/priorf_reasoner/bin/python -m pytest -q tests/
+```
+
+## Large Files And Git
+
+Large local artifacts are intentionally ignored:
+
+- benchmark `.mat` files;
+- parquet teacher exports;
+- PyTorch checkpoints and adapters;
+- safetensors/binary model files;
+- TensorBoard events;
+- generated `outputs/`.
+
+These files must be regenerated or supplied locally. Do not commit generated
+model/data artifacts to GitHub. If a large artifact is accidentally tracked, use
+`git rm --cached` to remove it from the index while preserving the local file.
+
+## Operator Rule
+
+If the head is broken, stop. If parity is broken, stop. If alpha collapses to
+teacher fallback, stop calling fusion a student result. If seed/checkpoint/export
+provenance does not match the benchmark claim, stop before Reasoner training.
