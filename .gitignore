@@ -24,8 +24,16 @@ Thumbs.db
 # Runtime artifact namespaces (diagnostic / gated / formal)
 outputs/
 
-# Canonical .mat regeneration cache
-assets/data/*_canonical.mat
+# Large local benchmark/model artifacts
+*.mat
+*.parquet
+*.arrow
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+events.out.tfevents.*
 
 # Teacher repo drop-in
 priorf_gnn/
